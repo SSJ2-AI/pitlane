@@ -1,0 +1,318 @@
+<!-- TCG Signal Video Studio section. Insert inside the main dashboard template body. -->
+<section id="video-studio" class="dashboard-section video-studio">
+  <style>
+    .video-studio {
+      margin: 2rem 0;
+      padding: 1.5rem;
+      border-radius: 16px;
+      background: #0f172a;
+      color: #e5e7eb;
+      box-shadow: 0 20px 50px rgba(15, 23, 42, 0.25);
+    }
+    .video-studio h2,
+    .video-studio h3 {
+      color: #f8fafc;
+      margin-top: 0;
+    }
+    .video-studio .analytics-grid,
+    .video-studio .background-grid {
+      display: grid;
+      gap: 1rem;
+    }
+    .video-studio .analytics-grid {
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      margin-bottom: 1.5rem;
+    }
+    .video-studio .analytics-card {
+      padding: 1rem;
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      border-radius: 12px;
+      background: rgba(15, 23, 42, 0.8);
+    }
+    .video-studio .analytics-label {
+      color: #94a3b8;
+      font-size: 0.85rem;
+      margin-bottom: 0.4rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .video-studio .analytics-value {
+      color: #ffffff;
+      font-size: 1.7rem;
+      font-weight: 700;
+    }
+    .video-studio .background-grid {
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      margin-bottom: 1.5rem;
+    }
+    .video-studio .background-option {
+      padding: 0;
+      border: 2px solid transparent;
+      border-radius: 12px;
+      background: #111827;
+      color: #f8fafc;
+      cursor: pointer;
+      overflow: hidden;
+      text-align: left;
+      transition: border-color 0.2s ease, transform 0.2s ease;
+    }
+    .video-studio .background-option:hover,
+    .video-studio .background-option.active {
+      border-color: #38bdf8;
+      transform: translateY(-1px);
+    }
+    .video-studio .background-option img {
+      display: block;
+      width: 100%;
+      height: 84px;
+      object-fit: cover;
+    }
+    .video-studio .background-option span {
+      display: block;
+      padding: 0.6rem 0.75rem;
+      font-weight: 600;
+    }
+    .video-studio .table-wrap {
+      overflow-x: auto;
+    }
+    .video-studio table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 850px;
+    }
+    .video-studio th,
+    .video-studio td {
+      border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+      padding: 0.75rem;
+      text-align: left;
+      vertical-align: middle;
+    }
+    .video-studio th {
+      color: #cbd5e1;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .video-studio .status-badge {
+      display: inline-block;
+      padding: 0.25rem 0.55rem;
+      border-radius: 999px;
+      background: #334155;
+      color: #f8fafc;
+      font-size: 0.78rem;
+      font-weight: 700;
+      text-transform: capitalize;
+    }
+    .video-studio .status-completed {
+      background: #047857;
+    }
+    .video-studio .status-processing,
+    .video-studio .status-queued,
+    .video-studio .status-pending {
+      background: #b45309;
+    }
+    .video-studio .status-failed {
+      background: #b91c1c;
+    }
+    .video-studio button.generate-video {
+      border: 0;
+      border-radius: 10px;
+      padding: 0.55rem 0.8rem;
+      background: #0ea5e9;
+      color: #ffffff;
+      cursor: pointer;
+      font-weight: 700;
+    }
+    .video-studio button.generate-video:disabled {
+      background: #475569;
+      cursor: wait;
+    }
+    .video-studio a {
+      color: #7dd3fc;
+      font-weight: 700;
+    }
+    .video-studio .muted {
+      color: #94a3b8;
+    }
+  </style>
+
+  <h2>Video Studio</h2>
+
+  <div class="analytics-grid" aria-label="Video analytics">
+    <div class="analytics-card">
+      <div class="analytics-label">Total Videos</div>
+      <div id="video-total-count" class="analytics-value">0</div>
+    </div>
+    <div class="analytics-card">
+      <div class="analytics-label">Completed</div>
+      <div id="video-completed-count" class="analytics-value">0</div>
+    </div>
+    <div class="analytics-card">
+      <div class="analytics-label">Est. Cost</div>
+      <div id="video-total-cost" class="analytics-value">$0.00</div>
+    </div>
+  </div>
+
+  <h3>Background</h3>
+  <div id="video-background-picker" class="background-grid">
+    <div class="muted">Loading backgrounds...</div>
+  </div>
+
+  <h3>Episodes</h3>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Title</th>
+          <th>Generate</th>
+          <th>Status</th>
+          <th>Video Preview</th>
+          <th>Shorts</th>
+          <th>Cost</th>
+        </tr>
+      </thead>
+      <tbody id="video-episodes-body">
+        <tr>
+          <td colspan="6" class="muted">Loading episodes...</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<script>
+  (function () {
+    const state = {
+      selectedBackground: "dark_studio",
+      backgrounds: [],
+      episodes: [],
+    };
+
+    function money(value) {
+      return "$" + (Number(value || 0)).toFixed(2);
+    }
+
+    function escapeHtml(value) {
+      return String(value || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    async function fetchJson(url, options) {
+      const response = await fetch(url, options);
+      if (!response.ok) {
+        throw new Error(url + " returned " + response.status);
+      }
+      return response.json();
+    }
+
+    async function loadBackgrounds() {
+      const picker = document.getElementById("video-background-picker");
+      try {
+        state.backgrounds = await fetchJson("/api/backgrounds");
+        picker.innerHTML = state.backgrounds.map((background) => `
+          <button type="button"
+                  class="background-option ${background.key === state.selectedBackground ? "active" : ""}"
+                  data-background-key="${escapeHtml(background.key)}">
+            <img src="${escapeHtml(background.url)}" alt="${escapeHtml(background.label)} background preview">
+            <span>${escapeHtml(background.label)}</span>
+          </button>
+        `).join("");
+      } catch (error) {
+        picker.innerHTML = `<div class="muted">Unable to load backgrounds: ${escapeHtml(error.message)}</div>`;
+      }
+    }
+
+    async function loadAnalytics() {
+      try {
+        const analytics = await fetchJson("/api/analytics");
+        document.getElementById("video-total-count").textContent = analytics.total_videos || 0;
+        document.getElementById("video-completed-count").textContent = analytics.completed_videos || 0;
+        document.getElementById("video-total-cost").textContent = money(analytics.total_cost);
+      } catch (error) {
+        console.warn("Video analytics unavailable", error);
+      }
+    }
+
+    async function loadEpisodes() {
+      const body = document.getElementById("video-episodes-body");
+      try {
+        state.episodes = await fetchJson("/api/video-episodes");
+        if (!state.episodes.length) {
+          body.innerHTML = `<tr><td colspan="6" class="muted">No episodes found.</td></tr>`;
+          return;
+        }
+        body.innerHTML = state.episodes.map((episode) => {
+          const status = episode.status || "not_started";
+          const busy = ["queued", "pending", "processing"].includes(status);
+          return `
+            <tr data-episode-id="${episode.episode_id}">
+              <td>${escapeHtml(episode.title)}</td>
+              <td>
+                <button type="button" class="generate-video"
+                        data-episode-id="${episode.episode_id}" ${busy ? "disabled" : ""}>
+                  ${busy ? "Working..." : "Generate Video"}
+                </button>
+              </td>
+              <td>
+                <span class="status-badge status-${escapeHtml(status)}">${escapeHtml(status.replace("_", " "))}</span>
+                ${episode.error_msg ? `<div class="muted">${escapeHtml(episode.error_msg)}</div>` : ""}
+              </td>
+              <td>${episode.video_url ? `<a href="${escapeHtml(episode.video_url)}" target="_blank" rel="noopener">Preview</a>` : `<span class="muted">-</span>`}</td>
+              <td>${episode.shorts_url ? `<a href="${escapeHtml(episode.shorts_url)}" target="_blank" rel="noopener">Shorts</a>` : `<span class="muted">-</span>`}</td>
+              <td>${money(episode.cost_usd)}</td>
+            </tr>
+          `;
+        }).join("");
+      } catch (error) {
+        body.innerHTML = `<tr><td colspan="6" class="muted">Unable to load episodes: ${escapeHtml(error.message)}</td></tr>`;
+      }
+    }
+
+    async function refreshVideoStudio() {
+      await Promise.all([loadAnalytics(), loadEpisodes()]);
+    }
+
+    document.addEventListener("click", async (event) => {
+      const backgroundButton = event.target.closest(".background-option");
+      if (backgroundButton) {
+        state.selectedBackground = backgroundButton.dataset.backgroundKey;
+        document.querySelectorAll(".background-option").forEach((button) => {
+          button.classList.toggle("active", button.dataset.backgroundKey === state.selectedBackground);
+        });
+        return;
+      }
+
+      const generateButton = event.target.closest(".generate-video");
+      if (!generateButton) {
+        return;
+      }
+
+      const episodeId = Number(generateButton.dataset.episodeId);
+      generateButton.disabled = true;
+      generateButton.textContent = "Queued...";
+      try {
+        await fetchJson("/api/video/generate", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            episode_id: episodeId,
+            background_key: state.selectedBackground,
+          }),
+        });
+        await refreshVideoStudio();
+      } catch (error) {
+        alert("Unable to start video generation: " + error.message);
+        generateButton.disabled = false;
+        generateButton.textContent = "Generate Video";
+      }
+    });
+
+    loadBackgrounds();
+    refreshVideoStudio();
+    window.setInterval(refreshVideoStudio, 5000);
+  })();
+</script>
