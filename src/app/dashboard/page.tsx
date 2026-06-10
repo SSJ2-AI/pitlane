@@ -24,6 +24,14 @@ type Recall = {
     remedy: string;
 };
 
+type RepairOrder = {
+    id: string;
+    number: string;
+    status: string;
+    service: string;
+    advisorName: string;
+};
+
 type Vehicle = {
     id: string;
     year: number;
@@ -42,8 +50,10 @@ type LookupData = {
         phone: string;
         email: string;
         customerSinceYear: number;
+        loyaltyTier?: string;
         lifetimeVisits: number;
         lifetimeSpend: number;
+        advisorNote?: string;
     };
     vehicles: Vehicle[];
     shopStatus: {
@@ -56,7 +66,9 @@ type LookupData = {
         date: string;
         time: string;
         services: string[];
+        advisorName?: string;
     };
+    openRepairOrders?: RepairOrder[];
 };
 
 const notFoundMessage = 'No customer found for this number - this may be a new customer.';
@@ -178,6 +190,7 @@ export default function DashboardPage() {
                                         <span className="rounded-full border border-zinc-800 bg-zinc-950 px-4 py-2">{data.customer.phone}</span>
                                         <span className="rounded-full border border-zinc-800 bg-zinc-950 px-4 py-2">{data.customer.email}</span>
                                         <span className="rounded-full border border-zinc-800 bg-zinc-950 px-4 py-2">Customer since {customerYears} years</span>
+                                        {data.customer.loyaltyTier && <span className="rounded-full border border-red-500/40 bg-red-600/15 px-4 py-2 font-bold text-red-200">{data.customer.loyaltyTier}</span>}
                                     </div>
                                 </div>
                                 <div className="grid grid-cols-2 gap-3 sm:min-w-[360px]">
@@ -266,6 +279,7 @@ export default function DashboardPage() {
                                         </div>
                                         <span className="rounded-full border border-zinc-700 bg-zinc-950 px-4 py-2 text-sm font-bold text-zinc-300">{activeVehicle.serviceHistory.length} visit{activeVehicle.serviceHistory.length === 1 ? '' : 's'}</span>
                                     </div>
+                                    {activeVehicle.serviceHistory.length > 0 ? (
                                     <div className="overflow-hidden rounded-2xl border border-zinc-800">
                                         {activeVehicle.serviceHistory.map((history) => {
                                             const isExpanded = Boolean(expandedRows[history.id]);
@@ -313,6 +327,9 @@ export default function DashboardPage() {
                                             );
                                         })}
                                     </div>
+                                    ) : (
+                                        <div className="rounded-2xl border border-zinc-800 bg-zinc-950 px-5 py-4 text-sm text-zinc-400">No service history recorded for this vehicle.</div>
+                                    )}
                                 </section>
                             </div>
 
@@ -347,9 +364,25 @@ export default function DashboardPage() {
                                 </section>
 
                                 <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-6">
+                                    <p className="text-sm font-semibold uppercase tracking-[0.32em] text-zinc-500">Customer open ROs</p>
+                                    <p className="mt-2 text-3xl font-black text-white">{data.openRepairOrders?.length ?? 0}</p>
+                                    <div className="mt-4 space-y-2">
+                                        {(data.openRepairOrders?.length ?? 0) > 0 ? data.openRepairOrders?.map((repairOrder) => (
+                                            <div key={repairOrder.id} className="rounded-2xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-sm text-zinc-300">
+                                                <p className="font-black text-white">{repairOrder.number} - {repairOrder.service}</p>
+                                                <p className="mt-1">{repairOrder.status} with {repairOrder.advisorName}</p>
+                                            </div>
+                                        )) : (
+                                            <div className="rounded-2xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-sm text-zinc-400">No open repair orders.</div>
+                                        )}
+                                    </div>
+                                </section>
+
+                                <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-6">
                                     <p className="text-sm font-semibold uppercase tracking-[0.32em] text-zinc-500">Next appointment</p>
                                     <h3 className="mt-2 text-2xl font-black text-white">{data.nextAppointment.date}</h3>
                                     <p className="mt-1 text-lg font-bold text-red-300">{data.nextAppointment.time}</p>
+                                    {data.nextAppointment.advisorName && <p className="mt-1 text-sm font-semibold text-zinc-300">Advisor: {data.nextAppointment.advisorName}</p>}
                                     <div className="mt-5 space-y-2">
                                         {data.nextAppointment.services.map((service) => (
                                             <div key={service} className="rounded-2xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-sm font-semibold text-zinc-200">{service}</div>
@@ -358,7 +391,11 @@ export default function DashboardPage() {
                                 </section>
 
                                 <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-6">
-                                    <p className="text-sm font-semibold uppercase tracking-[0.32em] text-zinc-500">Advisor prompts</p>
+                                    <p className="text-sm font-semibold uppercase tracking-[0.32em] text-zinc-500">Advisor note</p>
+                                    {data.customer.advisorNote && (
+                                        <p className="mt-4 rounded-2xl border border-red-500/30 bg-red-600/10 p-4 text-sm leading-6 text-red-100">{data.customer.advisorNote}</p>
+                                    )}
+                                    <p className="mt-6 text-sm font-semibold uppercase tracking-[0.32em] text-zinc-500">Advisor prompts</p>
                                     <ul className="mt-5 space-y-3 text-sm text-zinc-300">
                                         <li className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">Confirm contact preferences and appointment arrival window.</li>
                                         <li className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">Review open campaigns before preparing the write-up.</li>
