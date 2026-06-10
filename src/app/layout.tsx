@@ -1,4 +1,6 @@
 import type { Metadata } from 'next';
+import { IncomingCallPopup } from '@/components/IncomingCallPopup';
+import { VoiceProvider } from '@/providers/VoiceProvider';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -9,7 +11,12 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <VoiceProvider>
+          {children}
+          <IncomingCallPopup />
+        </VoiceProvider>
+      </body>
     </html>
   );
 }
