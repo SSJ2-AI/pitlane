@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>PitLane — Service Advisor Dashboard</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#09090b;--surface:#111113;--border:#1e1e22;--border2:#2a2a30;--text:#f1f1f1;--muted:#6b6b75;--accent:#e8a020;--green:#22c55e;--red:#ef4444;--blue:#3b82f6;--purple:#a855f7;--gold:#f59e0b}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+
+header{display:flex;align-items:center;justify-content:space-between;padding:0 24px;height:52px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0}
+.logo{display:flex;align-items:center;gap:10px}
+.logo-icon{width:28px;height:28px;background:var(--accent);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;color:#000}
+.logo-name{font-size:14px;font-weight:700;letter-spacing:.01em}
+.logo-dealer{font-size:11px;color:var(--muted);margin-left:4px}
+.hdr-right{display:flex;align-items:center;gap:14px}
+.ws-pill{display:flex;align-items:center;gap:6px;background:var(--border);border-radius:20px;padding:4px 10px;font-size:11px;color:var(--muted)}
+.ws-dot{width:7px;height:7px;border-radius:50%;background:var(--red);transition:background .3s}
+.ws-dot.on{background:var(--green)}
+.time{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+
+.layout{display:grid;grid-template-columns:1fr 300px;flex:1;overflow:hidden}
+.main{overflow-y:auto;padding:18px 20px;display:flex;flex-direction:column;gap:14px}
+.sidebar{border-left:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
+
+/* Call banner */
+.call-banner{border-radius:10px;border:1px solid var(--border2);padding:14px 18px;display:flex;align-items:center;gap:14px;transition:all .4s}
+.call-banner.active{border-color:rgba(34,197,94,.4);background:rgba(34,197,94,.05);animation:pb 1.8s infinite}
+.call-banner.ended{border-color:var(--border);background:rgba(107,107,107,.04)}
+@keyframes pb{0%,100%{border-color:rgba(34,197,94,.3)}50%{border-color:rgba(34,197,94,.6)}}
+.call-dot{width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;background:var(--border2);transition:background .3s}
+.call-dot.active{background:rgba(34,197,94,.15)}
+.call-info-text h3{font-size:14px;font-weight:600}
+.call-info-text p{font-size:11px;color:var(--muted);margin-top:2px}
+.call-timer{margin-left:auto;font-size:18px;font-family:monospace;font-weight:700;color:var(--green);min-width:55px;text-align:right;transition:color .3s}
+.call-timer.idle{color:var(--muted);font-size:12px}
+
+/* Customer */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+.card-head{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px}
+.avatar{width:42px;height:42px;border-radius:50%;background:var(--border2);display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:700;flex-shrink:0;text-transform:uppercase}
+.c-name{font-size:15px;font-weight:700}
+.c-meta{font-size:11px;color:var(--muted);margin-top:2px}
+.tier{margin-left:auto;padding:3px 9px;border-radius:20px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
+.t-Platinum{background:rgba(168,85,247,.14);color:#c084fc;border:1px solid rgba(168,85,247,.3)}
+.t-Gold{background:rgba(232,160,32,.12);color:var(--accent);border:1px solid rgba(232,160,32,.25)}
+.t-Silver{background:rgba(156,163,175,.1);color:#9ca3af;border:1px solid rgba(156,163,175,.2)}
+.t-Bronze{background:rgba(180,120,60,.1);color:#b4783c;border:1px solid rgba(180,120,60,.2)}
+
+.card-body{padding:14px 18px;display:flex;flex-direction:column;gap:12px}
+.sect-label{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:600;margin-bottom:6px}
+.vehicle{display:flex;align-items:center;gap:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:9px 12px}
+.vehicle-name{font-size:12px;font-weight:600}
+.vehicle-detail{font-size:11px;color:var(--muted)}
+.alert{border-radius:8px;padding:9px 12px;display:flex;gap:9px;align-items:flex-start}
+.alert.warn{background:rgba(251,191,36,.05);border:1px solid rgba(251,191,36,.2)}
+.alert.info{background:rgba(59,130,246,.05);border:1px solid rgba(59,130,246,.15)}
+.alert.danger{background:rgba(239,68,68,.05);border:1px solid rgba(239,68,68,.15)}
+.alert-icon{font-size:13px;flex-shrink:0;margin-top:1px}
+.alert-title{font-size:12px;font-weight:600;margin-bottom:2px}
+.alert-body{font-size:11px;color:#aaa;line-height:1.5}
+
+.empty-card{padding:36px 20px;display:flex;flex-direction:column;align-items:center;gap:8px;color:var(--muted);text-align:center}
+.empty-card .icon{font-size:32px;opacity:.25}
+.empty-card p{font-size:12px}
+
+/* Sidebar history */
+.sb-head{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.sb-title{font-size:12px;font-weight:600}
+.sb-count{background:var(--border2);border-radius:20px;padding:2px 7px;font-size:10px;color:var(--muted)}
+.call-list{overflow-y:auto;flex:1}
+.call-item{padding:12px 16px;border-bottom:1px solid var(--border);cursor:default}
+.ci-row{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3px}
+.ci-name{font-size:12px;font-weight:600}
+.ci-time{font-size:10px;color:var(--muted)}
+.ci-sum{font-size:11px;color:var(--muted);line-height:1.4}
+.ci-badge{display:inline-flex;align-items:center;gap:3px;font-size:10px;padding:2px 7px;border-radius:10px;margin-top:4px;font-weight:500}
+.b-in{background:rgba(34,197,94,.1);color:var(--green);border:1px solid rgba(34,197,94,.2)}
+.b-out{background:rgba(59,130,246,.1);color:var(--blue);border:1px solid rgba(59,130,246,.15)}
+.b-miss{background:rgba(239,68,68,.1);color:var(--red);border:1px solid rgba(239,68,68,.15)}
+.no-calls{padding:28px 16px;text-align:center;color:var(--muted);font-size:11px}
+
+/* Demo panel */
+.demo-panel{padding:10px 14px;border-top:1px solid var(--border);background:rgba(0,0,0,.3);flex-shrink:0}
+.demo-heading{font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:7px;font-weight:700}
+.demo-grid{display:flex;flex-direction:column;gap:5px}
+.demo-btn{display:flex;justify-content:space-between;align-items:center;padding:6px 10px;border:1px solid var(--border2);border-radius:7px;background:var(--surface);color:var(--text);font-size:10px;cursor:pointer;transition:background .15s;text-align:left;width:100%}
+.demo-btn:hover{background:var(--border2)}
+.demo-btn .dn{font-weight:600;font-size:11px}
+.demo-btn .ds{color:var(--muted);font-size:10px}
+.demo-tier{font-size:9px;font-weight:700;padding:1px 6px;border-radius:10px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">P</div>
+    <span class="logo-name">PitLane</span>
+    <span class="logo-dealer" id="dealer-name">Porsche Toronto</span>
+  </div>
+  <div class="hdr-right">
+    <div class="ws-pill"><div class="ws-dot" id="ws-dot"></div><span id="ws-label">Connecting...</span></div>
+    <div class="time" id="clock"></div>
+  </div>
+</header>
+
+<div class="layout">
+  <div class="main">
+
+    <!-- Call status banner -->
+    <div class="call-banner" id="call-banner">
+      <div class="call-dot" id="call-dot">📞</div>
+      <div class="call-info-text">
+        <h3 id="call-status-text">No active calls</h3>
+        <p id="call-status-sub">Waiting for inbound calls from Aria</p>
+      </div>
+      <div class="call-timer idle" id="call-timer">–</div>
+    </div>
+
+    <!-- Customer card -->
+    <div class="card" id="customer-card">
+      <div class="empty-card" id="empty-state">
+        <div class="icon">👤</div>
+        <p>Customer profile will appear here when a call comes in</p>
+      </div>
+      <div id="customer-content" style="display:none">
+        <div class="card-head">
+          <div class="avatar" id="c-avatar">?</div>
+          <div>
+            <div class="c-name" id="c-name">—</div>
+            <div class="c-meta" id="c-meta">—</div>
+          </div>
+          <div class="tier" id="c-tier"></div>
+        </div>
+        <div class="card-body" id="card-body"></div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="sidebar">
+    <div class="sb-head">
+      <span class="sb-title">Call History</span>
+      <span class="sb-count" id="call-count">0</span>
+    </div>
+    <div class="call-list" id="call-list">
+      <div class="no-calls">No calls yet</div>
+    </div>
+    <div class="demo-panel">
+      <div class="demo-heading">Simulate CDK Customer Call</div>
+      <div class="demo-grid" id="demo-grid"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = window.location.origin;
+const WS_URL = API.replace('https','wss').replace('http','ws') + '/ws';
+
+// ── Clock ──────────────────────────────────────────────────────────────────
+function updateClock(){
+  const d=new Date();
+  document.getElementById('clock').textContent=d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+}
+setInterval(updateClock,1000); updateClock();
+
+// ── State ──────────────────────────────────────────────────────────────────
+let callStart=null, timerInterval=null, callLog=[];
+
+// ── WebSocket ──────────────────────────────────────────────────────────────
+let ws,reconnectTimer;
+function connect(){
+  clearTimeout(reconnectTimer);
+  ws=new WebSocket(WS_URL);
+  ws.onopen=()=>{
+    document.getElementById('ws-dot').className='ws-dot on';
+    document.getElementById('ws-label').textContent='Connected';
+  };
+  ws.onclose=()=>{
+    document.getElementById('ws-dot').className='ws-dot';
+    document.getElementById('ws-label').textContent='Reconnecting...';
+    reconnectTimer=setTimeout(connect,5000);
+  };
+  ws.onerror=()=>ws.close();
+  ws.onmessage=e=>{
+    try{handleEvent(JSON.parse(e.data));}catch(x){}
+  };
+}
+connect();
+
+function handleEvent(ev){
+  if(ev.type==='INCOMING_CALL') showCustomer(ev);
+  else if(ev.type==='CALL_ENDED') endCall(ev);
+  else if(ev.type==='OUTBOUND_INITIATED') showOutbound(ev);
+}
+
+// ── Incoming call ──────────────────────────────────────────────────────────
+function showCustomer(ev){
+  const {caller,callId}=ev;
+  const c=caller.customer;
+  
+  // Banner
+  setBanner('active','📞',c?`${c.firstName} ${c.lastName} — Inbound Call`:'Unknown Caller — Inbound',caller.phone);
+  startTimer();
+
+  if(!c){
+    document.getElementById('empty-state').innerHTML=`<div class="icon">❓</div><p>Unknown number: ${caller.phone}</p><p style="margin-top:4px;font-size:10px">Not in CDK system</p>`;
+    document.getElementById('customer-content').style.display='none';
+    document.getElementById('empty-state').style.display='flex';
+    return;
+  }
+
+  // Show customer
+  document.getElementById('empty-state').style.display='none';
+  document.getElementById('customer-content').style.display='block';
+  document.getElementById('c-avatar').textContent=c.firstName[0]+c.lastName[0];
+  document.getElementById('c-name').textContent=`${c.firstName} ${c.lastName}`;
+  document.getElementById('c-meta').textContent=`${caller.phone} · Last visit: ${c.lastVisit||'—'} · Lifetime: $${(c.lifetimeValue||0).toLocaleString()}`;
+  const tierEl=document.getElementById('c-tier');
+  tierEl.textContent=c.loyaltyTier||'';
+  tierEl.className=`tier t-${c.loyaltyTier||''}`;
+
+  buildCardBody(c);
+
+  // Log
+  callLog.unshift({type:'inbound',name:`${c.firstName} ${c.lastName}`,time:new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),summary:'Aria handling call...',callId});
+  renderHistory();
+}
+
+function buildCardBody(c){
+  const body=document.getElementById('card-body');
+  body.innerHTML='';
+
+  // Vehicles
+  if(c.vehicles?.length){
+    body.innerHTML+=`<div><div class="sect-label">Vehicles on File</div>
+    ${c.vehicles.map(v=>`<div class="vehicle">
+      <span style="font-size:20px">🚗</span>
+      <div><div class="vehicle-name">${v.year} Porsche ${v.model} ${v.trim||''}</div>
+      <div class="vehicle-detail">${v.mileage?.toLocaleString()} km · ${v.licensePlate}</div></div>
+    </div>`).join('')}</div>`;
+  }
+
+  // Open ROs
+  if(c.openRepairOrders?.length){
+    const ro=c.openRepairOrders[0];
+    const color=ro.status==='awaiting_parts'?'warn':ro.status==='in_progress'?'info':'warn';
+    body.innerHTML+=`<div class="alert ${color}">
+      <span class="alert-icon">${ro.status==='awaiting_parts'?'⏳':ro.status==='in_progress'?'🔧':'📋'}</span>
+      <div>
+        <div class="alert-title">RO ${ro.roNumber} — ${ro.status.replace('_',' ').replace(/\b\w/g,l=>l.toUpperCase())}</div>
+        <div class="alert-body">${ro.description}${ro.estimatedCompletion?` · ETA: ${ro.estimatedCompletion}`:''}</div>
+      </div>
+    </div>`;
+  }
+
+  // Upcoming appointment
+  if(c.upcomingAppointments?.length){
+    const a=c.upcomingAppointments[0];
+    body.innerHTML+=`<div class="alert info">
+      <span class="alert-icon">📅</span>
+      <div>
+        <div class="alert-title">Upcoming: ${a.date} at ${a.time}</div>
+        <div class="alert-body">${a.serviceType} · Advisor: ${a.advisorName}</div>
+      </div>
+    </div>`;
+  }
+
+  // Open recalls
+  if(c.openRecalls?.some(r=>r.status==='open')){
+    const r=c.openRecalls.find(x=>x.status==='open');
+    body.innerHTML+=`<div class="alert danger">
+      <span class="alert-icon">⚠️</span>
+      <div>
+        <div class="alert-title">Open Recall — ${r.component||'See details'}</div>
+        <div class="alert-body">${r.remedy||r.description}</div>
+      </div>
+    </div>`;
+  }
+
+  if(c.notes){
+    body.innerHTML+=`<div><div class="sect-label">Advisor Notes</div>
+    <div style="font-size:11px;color:#888;line-height:1.5;background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:9px 12px">${c.notes}</div></div>`;
+  }
+}
+
+function endCall(ev){
+  clearInterval(timerInterval); timerInterval=null;
+  setBanner('ended','✅','Call ended',`Duration: ${ev.duration||0}s`);
+  document.getElementById('call-timer').className='call-timer idle';
+  document.getElementById('call-timer').textContent='–';
+
+  // Update log
+  const entry=callLog.find(x=>x.callId===ev.callId);
+  if(entry){entry.summary=ev.summary||'Call completed';entry.duration=ev.duration;}
+  renderHistory();
+}
+
+function showOutbound(ev){
+  const c=ev.customer;
+  setBanner('active','📤',`Outbound: ${c?.firstName||'Customer'}`,ev.callType?.replace('_',' ')||'Outbound call');
+  callLog.unshift({type:'outbound',name:c?`${c.firstName} ${c.lastName}`:'Customer',time:new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),summary:ev.callType?.replace(/_/g,' ')||'Outbound call',callId:ev.callId});
+  renderHistory();
+}
+
+function setBanner(state,icon,title,sub){
+  document.getElementById('call-banner').className=`call-banner ${state}`;
+  document.getElementById('call-dot').textContent=icon;
+  document.getElementById('call-dot').className=`call-dot ${state}`;
+  document.getElementById('call-status-text').textContent=title;
+  document.getElementById('call-status-sub').textContent=sub;
+}
+
+function startTimer(){
+  callStart=Date.now();
+  clearInterval(timerInterval);
+  timerInterval=setInterval(()=>{
+    const s=Math.floor((Date.now()-callStart)/1000);
+    const m=Math.floor(s/60),sec=s%60;
+    document.getElementById('call-timer').className='call-timer active';
+    document.getElementById('call-timer').textContent=`${m}:${String(sec).padStart(2,'0')}`;
+  },1000);
+}
+
+function renderHistory(){
+  document.getElementById('call-count').textContent=callLog.length;
+  if(!callLog.length){
+    document.getElementById('call-list').innerHTML='<div class="no-calls">No calls yet</div>';
+    return;
+  }
+  document.getElementById('call-list').innerHTML=callLog.slice(0,20).map(c=>`
+    <div class="call-item">
+      <div class="ci-row"><span class="ci-name">${c.name}</span><span class="ci-time">${c.time}</span></div>
+      <div class="ci-sum">${c.summary}${c.duration?` (${c.duration}s)`:''}</div>
+      <span class="ci-badge ${c.type==='inbound'?'b-in':c.type==='outbound'?'b-out':'b-miss'}">
+        ${c.type==='inbound'?'↙ Inbound':'↗ Outbound'}
+      </span>
+    </div>`).join('');
+}
+
+// ── Demo buttons — load customers from API ────────────────────────────────
+async function loadDemoCustomers(){
+  try{
+    const r=await fetch(`${API}/demo/customers`);
+    const d=await r.json();
+    const grid=document.getElementById('demo-grid');
+    grid.innerHTML=d.customers.map(c=>`
+      <button class="demo-btn" onclick="simulateCall('${c.phone}','${c.id}')">
+        <div><div class="dn">${c.name}</div><div class="ds">${c.scenario}</div></div>
+        <span class="demo-tier t-${c.loyaltyTier}" style="padding:1px 6px;border-radius:10px;font-size:9px;font-weight:700">${c.loyaltyTier||''}</span>
+      </button>`).join('');
+    // Set dealer name
+    const dealer=d.customers[0]?.dealershipName||'Porsche Toronto';
+    document.getElementById('dealer-name').textContent='— '+dealer;
+  }catch(e){console.warn('Could not load customers',e);}
+}
+
+async function simulateCall(phone,customerId){
+  // Set override so next real call uses this customer
+  await fetch(`${API}/demo/set-next-caller`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({as_customer_id:customerId})});
+  // Fire screen pop immediately
+  await fetch(`${API}/demo/simulate-inbound`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone})});
+}
+
+loadDemoCustomers();
+// Reload history every 10s
+setInterval(async()=>{
+  try{
+    const r=await fetch(`${API}/calls/history`);
+    const d=await r.json();
+    if(d.calls?.length&&d.calls.length!==callLog.length){
+      callLog=d.calls.map(c=>({...c,name:c.customerName||c.phone,time:new Date(c.timestamp).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}));
+      renderHistory();
+    }
+  }catch(e){}
+},10000);
+</script>
+<!-- ElevenLabs browser call widget (works without Twilio) -->
+<elevenlabs-convai agent-id="agent_2701ktpgkyr7f37vq8dmgxjw4bkt"></elevenlabs-convai>
+<script src="https://elevenlabs.io/convai-widget/index.js" async type="text/javascript"></script>
+</body>
+</html>
