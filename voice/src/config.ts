@@ -14,6 +14,11 @@ export const config = {
 
   pitlaneDashboardUrl: process.env.PITLANE_DASHBOARD_URL ?? 'http://localhost:3000',
   webhookSecret: process.env.WEBHOOK_SECRET ?? '',
+  // ElevenLabs pre-call webhook HMAC secret. When set, requests to
+  // POST /webhook/pre-call must include a valid ElevenLabs-Signature
+  // header. When unset, signature verification is skipped (useful for
+  // local development and demos).
+  elevenLabsWebhookSecret: process.env.ELEVENLABS_WEBHOOK_SECRET ?? '',
 
   // Dealership branding — override per deployment for each CDK-connected branch
   dealershipName: process.env.DEALERSHIP_NAME ?? 'Porsche Toronto',
