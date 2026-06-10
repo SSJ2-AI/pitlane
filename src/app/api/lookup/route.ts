@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 
 const customers = [{
     customer: {
+        id: 'cust_001',
         name: 'James Whitfield',
         phone: '647-555-0192',
         email: 'j.whitfield@gmail.com',
@@ -89,6 +90,7 @@ const customers = [{
     ],
 }, {
     customer: {
+        id: 'cust_005',
         name: 'Sulaim Siddiqi',
         phone: '+16475457709',
         email: 'sulaim91@googlemail.com',

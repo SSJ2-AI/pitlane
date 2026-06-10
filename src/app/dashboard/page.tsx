@@ -50,6 +50,7 @@ type Vehicle = {
 
 type LookupData = {
     customer: {
+        id?: string;
         name: string;
         phone: string;
         email: string;
@@ -219,7 +220,11 @@ export default function DashboardPage() {
                                     <p className="mb-2 text-sm font-semibold uppercase tracking-[0.32em] text-zinc-500">Customer profile</p>
                                     <div className="flex flex-wrap items-center gap-4">
                                         <h2 className="text-3xl font-black tracking-tight text-white sm:text-4xl">{data.customer.name}</h2>
-                                        <OutboundCallButton phone={data.customer.phone} userName={data.customer.name} />
+                                        <OutboundCallButton
+                                            customerId={data.customer.id}
+                                            customerName={data.customer.name}
+                                            phone={data.customer.phone}
+                                        />
                                     </div>
                                     <div className="mt-4 flex flex-wrap gap-3 text-sm text-zinc-300">
                                         <span className="rounded-full border border-zinc-800 bg-zinc-950 px-4 py-2">{data.customer.phone}</span>
@@ -425,7 +430,11 @@ export default function DashboardPage() {
                                     </div>
                                 </section>
 
-                                <CallHistory />
+                                <CallHistory customerId={data.customer.id} />
+
+                                {data.customer.id && (
+                                    <CallHistory title="All recent calls" />
+                                )}
 
                                 <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-6">
                                     <p className="text-sm font-semibold uppercase tracking-[0.32em] text-zinc-500">Advisor note</p>
