@@ -5,6 +5,7 @@ import { broadcastScreenPop } from '../ws/screenPop'
 import { CustomerLookupRequest, BookAppointmentRequest, CheckROStatusRequest, Appointment } from '../types'
 import { config } from '../config'
 import { randomUUID } from 'crypto'
+import { recordEvent, startInboundCall } from '../store/callStore'
 
 const router = Router()
 
@@ -60,7 +61,7 @@ router.post('/customer-lookup', (req: Request, res: Response): void => {
   const customer = overrideId ? lookupById(overrideId) : await lookupByPhoneWithCDK(phone)
 
   if (!customer) {
-    // Unknown caller — still broadcast so advisor sees "Unknown caller" pop
+    startInboundCall({ callId, phone, customer: null })
     broadcastScreenPop({
       type: 'INCOMING_CALL',
       callId,
@@ -75,7 +76,7 @@ router.post('/customer-lookup', (req: Request, res: Response): void => {
     })
   }
 
-  // Fire screen pop to all connected PitLane dashboard clients
+  startInboundCall({ callId, phone, customer })
   broadcastScreenPop({
     type: 'INCOMING_CALL',
     callId,
@@ -146,13 +147,19 @@ router.get('/book-appointment', (req: Request, res: Response) => {
     req.query.service_type as string,
     req.query.preferred_date as string,
     req.query.preferred_time as string | undefined,
+    (req.query.call_id as string | undefined) ?? undefined,
     res
   )
 })
 
 // GET /tools/check-ro-status/:customer_id — path param version for ElevenLabs
 router.get('/check-ro-status/:customer_id', (req: Request, res: Response) => {
-  return handleCheckROStatus(req.params.customer_id, req.query.ro_number as string | undefined, res)
+  return handleCheckROStatus(
+    req.params.customer_id,
+    req.query.ro_number as string | undefined,
+    (req.query.call_id as string | undefined) ?? undefined,
+    res,
+  )
 })
 
 /**
@@ -166,6 +173,7 @@ router.post('/book-appointment', (req: Request, res: Response) => {
     body.service_type as string,
     body.preferred_date as string,
     body.preferred_time as string | undefined,
+    body.call_id as string | undefined,
     res
   )
 })
@@ -176,7 +184,12 @@ router.post('/book-appointment', (req: Request, res: Response) => {
  */
 router.post('/check-ro-status', (req: Request, res: Response) => {
   const body = req.body as CheckROStatusRequest
-  return handleCheckROStatus(body.customer_id as string | undefined, body.ro_number as string | undefined, res)
+  return handleCheckROStatus(
+    body.customer_id as string | undefined,
+    body.ro_number as string | undefined,
+    body.call_id as string | undefined,
+    res,
+  )
 })
 
 // ─── Shared appointment booking handler ───────────────────────────────────────
@@ -187,9 +200,10 @@ function handleBookAppointment(
   serviceType: string,
   preferredDate: string,
   preferredTime: string | undefined,
+  callId: string | undefined,
   res: Response
 ): Response {
-  console.log(`[Tool] book-appointment: customer=${customerId} service=${serviceType} date=${preferredDate}`)
+  console.log(`[Tool] book-appointment: customer=${customerId} service=${serviceType} date=${preferredDate} call=${callId ?? 'n/a'}`)
   const customer = lookupById(customerId)
   if (!customer) {
     return res.status(404).json({ success: false, error: 'Customer not found' })
@@ -208,6 +222,18 @@ function handleBookAppointment(
     status: 'scheduled',
   }
   customer.upcomingAppointments.push(newAppt)
+
+  if (callId) {
+    recordEvent(callId, 'APPOINTMENT_REQUESTED', {
+      customerId: customer.id,
+      vehicleId: newAppt.vehicleId,
+      serviceType,
+      date: preferredDate,
+      time,
+      confirmationNumber,
+    })
+  }
+
   return res.json({
     success: true,
     confirmationNumber,
@@ -226,9 +252,18 @@ function handleBookAppointment(
 function handleCheckROStatus(
   customerId: string | undefined,
   roNumber: string | undefined,
+  callId: string | undefined,
   res: Response
 ): Response {
-  console.log(`[Tool] check-ro-status: ro=${roNumber} customer=${customerId}`)
+  console.log(`[Tool] check-ro-status: ro=${roNumber} customer=${customerId} call=${callId ?? 'n/a'}`)
+  if (callId) {
+    recordEvent(callId, 'NOTE_ADDED', {
+      source: 'aria',
+      action: 'check_ro_status',
+      roNumber: roNumber ?? null,
+      customerId: customerId ?? null,
+    })
+  }
   let ro = null
   if (roNumber) {
     for (const c of MOCK_CUSTOMERS) {
@@ -265,6 +300,7 @@ async function handleCustomerLookup(phone: string, callId: string, res: Response
   const customer = overrideId ? lookupById(overrideId) : lookupByPhone(phone)
 
   if (!customer) {
+    startInboundCall({ callId, phone, customer: null })
     broadcastScreenPop({
       type: 'INCOMING_CALL',
       callId,
@@ -278,6 +314,7 @@ async function handleCustomerLookup(phone: string, callId: string, res: Response
     })
   }
 
+  startInboundCall({ callId, phone, customer })
   broadcastScreenPop({
     type: 'INCOMING_CALL',
     callId,

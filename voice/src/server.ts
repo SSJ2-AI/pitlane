@@ -113,13 +113,14 @@ app.get('/demo/overrides', (_req, res) => res.json(listOverrides()))
 app.post('/demo/simulate-inbound', (req, res) => {
   const { phone = '+16475550101' } = req.body as { phone?: string }
 
-  // Simulate what happens when a customer calls — trigger the tool manually
   const { lookupByPhone } = require('./mock/customers')
   const { broadcastScreenPop } = require('./ws/screenPop')
+  const { startInboundCall } = require('./store/callStore')
   const { randomUUID } = require('crypto')
 
   const customer = lookupByPhone(phone)
   const callId = randomUUID()
+  startInboundCall({ callId, phone, customer })
 
   broadcastScreenPop({
     type: 'INCOMING_CALL',

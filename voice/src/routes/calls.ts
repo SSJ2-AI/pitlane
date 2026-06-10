@@ -3,6 +3,7 @@ import { lookupById, MOCK_CUSTOMERS } from '../mock/customers'
 import { broadcastScreenPop } from '../ws/screenPop'
 import { config } from '../config'
 import { OutboundCallType } from '../types'
+import { startOutboundCall, listCalls, getCall, getCustomerTimeline } from '../store/callStore'
 
 const router = Router()
 
@@ -113,6 +114,7 @@ router.post('/outbound', async (req: Request, res: Response) => {
       timestamp: new Date().toISOString(),
     }
     callLog.unshift(logEntry)
+    startOutboundCall({ callId: logEntry.id, customer, callType: call_type })
 
     broadcastScreenPop({
       type: 'OUTBOUND_INITIATED',
@@ -189,12 +191,45 @@ router.post('/batch', async (req: Request, res: Response) => {
 /**
  * GET /calls/history
  * Returns recent call log for the PitLane dashboard.
+ * Falls back to the persistent call store when in-memory log is empty
+ * (e.g. between deploys) so the dashboard still has something to show.
  */
 router.get('/history', (_req: Request, res: Response) => {
-  res.json({
-    calls: callLog.slice(0, 50),
-    total: callLog.length,
-  })
+  if (callLog.length > 0) {
+    return res.json({ calls: callLog.slice(0, 50), total: callLog.length })
+  }
+  const stored = listCalls(50).map((c) => ({
+    id: c.callId,
+    direction: c.direction,
+    callType: c.callType,
+    customerId: c.customerId,
+    customerName: c.customerName,
+    phone: c.phone,
+    status: c.status,
+    duration: c.durationSeconds,
+    summary: c.summary,
+    timestamp: c.startedAt,
+  }))
+  return res.json({ calls: stored, total: stored.length })
+})
+
+/**
+ * GET /calls/:callId
+ * Full call detail: every event, transcript, summary.
+ */
+router.get('/:callId', (req: Request, res: Response) => {
+  const record = getCall(req.params.callId)
+  if (!record) return res.status(404).json({ error: 'Call not found' })
+  return res.json(record)
+})
+
+/**
+ * GET /calls/customer/:customerId/timeline
+ * Every call + every event Aria has had with this customer.
+ * Used by the PitLane advisor dashboard to render a per-customer activity feed.
+ */
+router.get('/customer/:customerId/timeline', (req: Request, res: Response) => {
+  return res.json(getCustomerTimeline(req.params.customerId))
 })
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -211,6 +246,7 @@ function handleMockOutbound(customer: NonNullable<ReturnType<typeof lookupById>>
     status: 'initiated',
     timestamp: new Date().toISOString(),
   })
+  startOutboundCall({ callId: mockId, customer, callType })
 
   broadcastScreenPop({
     type: 'OUTBOUND_INITIATED',
