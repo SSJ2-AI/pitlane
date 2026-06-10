@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, ReactNode, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 
 export type VoiceCustomerVehicle = {
     id?: string;
@@ -19,6 +19,7 @@ export type VoiceRepairOrder = {
     roNumber?: string;
     status?: string;
     serviceType?: string;
+    description?: string;
     advisorName?: string;
     openedAt?: string;
     total?: number;
@@ -38,10 +39,13 @@ export type VoiceAppointment = {
 
 export type VoiceRecall = {
     id?: string;
+    nhtsa_id?: string;
     campaign?: string;
     component?: string;
     summary?: string;
+    description?: string;
     remedy?: string;
+    status?: string;
 };
 
 export type VoiceCustomer = {
@@ -66,7 +70,7 @@ export type VoiceCustomer = {
     notes?: string;
 };
 
-export type IncomingCall = {
+export type IncomingCallEvent = {
     type: 'INCOMING_CALL';
     callId?: string;
     caller?: {
@@ -76,14 +80,44 @@ export type IncomingCall = {
     timestamp?: string;
 };
 
-type VoiceMessage = IncomingCall | {
-    type?: string;
-    [key: string]: unknown;
+export type CallEndedEvent = {
+    type: 'CALL_ENDED';
+    callId?: string;
+    duration?: number;
+    summary?: string;
+    transcript?: string;
+    timestamp?: string;
 };
 
+export type OutboundInitiatedEvent = {
+    type: 'OUTBOUND_INITIATED';
+    callId?: string;
+    customer?: VoiceCustomer | null;
+    callType?: string;
+    timestamp?: string;
+};
+
+export type ConnectedEvent = {
+    type: 'CONNECTED';
+    message?: string;
+    timestamp?: string;
+};
+
+export type VoiceEvent =
+    | IncomingCallEvent
+    | CallEndedEvent
+    | OutboundInitiatedEvent
+    | ConnectedEvent
+    | { type?: string; [key: string]: unknown };
+
+export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected';
+
 type VoiceContextValue = {
-    incomingCall: IncomingCall | null;
-    connectionStatus: 'connecting' | 'connected' | 'disconnected';
+    voiceServiceUrl: string;
+    incomingCall: IncomingCallEvent | null;
+    lastEvent: VoiceEvent | null;
+    recentEvents: VoiceEvent[];
+    connectionStatus: ConnectionStatus;
     lastMessageAt: string | null;
     dismissIncomingCall: () => void;
     reconnect: () => void;
@@ -91,7 +125,11 @@ type VoiceContextValue = {
 
 const VoiceContext = createContext<VoiceContextValue | undefined>(undefined);
 
-const voiceServiceUrl = process.env.NEXT_PUBLIC_VOICE_SERVICE_URL ?? 'https://pitlane-voice-production.up.railway.app';
+const defaultVoiceServiceUrl = 'https://pitlane-voice-production.up.railway.app';
+const voiceServiceUrl =
+    process.env.NEXT_PUBLIC_VOICE_SERVICE_URL && process.env.NEXT_PUBLIC_VOICE_SERVICE_URL.length > 0
+        ? process.env.NEXT_PUBLIC_VOICE_SERVICE_URL
+        : defaultVoiceServiceUrl;
 
 function toWebSocketUrl(serviceUrl: string) {
     const url = new URL('/ws', serviceUrl);
@@ -99,9 +137,13 @@ function toWebSocketUrl(serviceUrl: string) {
     return url.toString();
 }
 
+const MAX_RECENT_EVENTS = 20;
+
 export function VoiceProvider({ children }: { children: ReactNode }) {
-    const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
-    const [connectionStatus, setConnectionStatus] = useState<VoiceContextValue['connectionStatus']>('connecting');
+    const [incomingCall, setIncomingCall] = useState<IncomingCallEvent | null>(null);
+    const [lastEvent, setLastEvent] = useState<VoiceEvent | null>(null);
+    const [recentEvents, setRecentEvents] = useState<VoiceEvent[]>([]);
+    const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('connecting');
     const [lastMessageAt, setLastMessageAt] = useState<string | null>(null);
     const reconnectToken = useRef(0);
     const [reconnectCounter, setReconnectCounter] = useState(0);
@@ -109,7 +151,17 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
     useEffect(() => {
         let isActive = true;
         let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-        const socket = new WebSocket(toWebSocketUrl(voiceServiceUrl));
+        let socket: WebSocket | null = null;
+
+        try {
+            socket = new WebSocket(toWebSocketUrl(voiceServiceUrl));
+        } catch (error) {
+            console.warn('PitLane voice WebSocket failed to construct', error);
+            setConnectionStatus('disconnected');
+            return () => {
+                isActive = false;
+            };
+        }
 
         setConnectionStatus('connecting');
 
@@ -121,11 +173,19 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
             if (!isActive) return;
 
             try {
-                const message = JSON.parse(String(event.data)) as VoiceMessage;
+                const message = JSON.parse(String(event.data)) as VoiceEvent;
                 setLastMessageAt(new Date().toISOString());
+                setLastEvent(message);
+                setRecentEvents((current) => [message, ...current].slice(0, MAX_RECENT_EVENTS));
 
                 if (message.type === 'INCOMING_CALL') {
-                    setIncomingCall(message as IncomingCall);
+                    setIncomingCall(message as IncomingCallEvent);
+                } else if (message.type === 'CALL_ENDED') {
+                    setIncomingCall((current) => {
+                        if (!current) return null;
+                        if (!current.callId || !(message as CallEndedEvent).callId) return null;
+                        return current.callId === (message as CallEndedEvent).callId ? null : current;
+                    });
                 }
             } catch (error) {
                 console.warn('Unable to parse PitLane voice message', error);
@@ -143,26 +203,32 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
 
         socket.addEventListener('error', () => {
             if (isActive) setConnectionStatus('disconnected');
-            socket.close();
+            socket?.close();
         });
 
         return () => {
             isActive = false;
             if (reconnectTimer) clearTimeout(reconnectTimer);
-            socket.close();
+            socket?.close();
         };
     }, [reconnectCounter]);
 
+    const dismissIncomingCall = useCallback(() => setIncomingCall(null), []);
+    const reconnect = useCallback(() => {
+        reconnectToken.current += 1;
+        setReconnectCounter(reconnectToken.current);
+    }, []);
+
     const value = useMemo<VoiceContextValue>(() => ({
+        voiceServiceUrl,
         incomingCall,
+        lastEvent,
+        recentEvents,
         connectionStatus,
         lastMessageAt,
-        dismissIncomingCall: () => setIncomingCall(null),
-        reconnect: () => {
-            reconnectToken.current += 1;
-            setReconnectCounter(reconnectToken.current);
-        },
-    }), [connectionStatus, incomingCall, lastMessageAt]);
+        dismissIncomingCall,
+        reconnect,
+    }), [incomingCall, lastEvent, recentEvents, connectionStatus, lastMessageAt, dismissIncomingCall, reconnect]);
 
     return <VoiceContext.Provider value={value}>{children}</VoiceContext.Provider>;
 }

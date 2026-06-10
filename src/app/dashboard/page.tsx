@@ -1,6 +1,10 @@
 'use client';
 
-import { FormEvent, useMemo, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { CallHistory } from '@/components/CallHistory';
+import { OutboundCallButton } from '@/components/OutboundCallButton';
+import { VoiceStatusDot } from '@/components/VoiceStatusDot';
+import { useVoice } from '@/providers/VoiceProvider';
 
 type DeclinedService = {
     service: string;
@@ -96,6 +100,8 @@ export default function DashboardPage() {
     const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
     const [message, setMessage] = useState('');
     const [isLoading, setIsLoading] = useState(false);
+    const { incomingCall } = useVoice();
+    const lastAutoLoadedCallId = useRef<string | null>(null);
 
     const activeVehicle = useMemo(() => {
         if (!data) return null;
@@ -105,15 +111,20 @@ export default function DashboardPage() {
     const customerYears = data ? new Date().getFullYear() - data.customer.customerSinceYear : 0;
     const hasDashboard = Boolean(data && activeVehicle);
 
-    async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-        event.preventDefault();
+    const runLookup = useCallback(async (lookupPhone: string) => {
+        if (!lookupPhone || lookupPhone.replace(/\D/g, '').length < 10) {
+            setMessage(notFoundMessage);
+            setData(null);
+            setActiveVehicleId(null);
+            return;
+        }
         setIsLoading(true);
         setMessage('');
         try {
             const response = await fetch('/api/lookup', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ phone }),
+                body: JSON.stringify({ phone: lookupPhone }),
             });
             const payload = await response.json();
             if (!response.ok || !payload?.customer) {
@@ -132,7 +143,25 @@ export default function DashboardPage() {
         } finally {
             setIsLoading(false);
         }
+    }, []);
+
+    async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+        event.preventDefault();
+        await runLookup(phone);
     }
+
+    // When Aria identifies a caller, auto-load that customer into the dashboard
+    // so the advisor sees the same person Aria is talking to.
+    useEffect(() => {
+        if (!incomingCall) return;
+        const callId = incomingCall.callId;
+        const incomingPhone = incomingCall.caller?.phone ?? incomingCall.caller?.customer?.phone;
+        if (!incomingPhone) return;
+        if (callId && lastAutoLoadedCallId.current === callId) return;
+        lastAutoLoadedCallId.current = callId ?? null;
+        setPhone(incomingPhone);
+        void runLookup(incomingPhone);
+    }, [incomingCall, runLookup]);
 
     function toggleHistoryRow(id: string) {
         setExpandedRows((current) => ({ ...current, [id]: !current[id] }));
@@ -149,9 +178,12 @@ export default function DashboardPage() {
                             <p className="text-xs uppercase tracking-[0.35em] text-zinc-500">Porsche service desk</p>
                         </div>
                     </div>
-                    <div className="inline-flex w-fit items-center rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200">
-                        <span className="mr-2 h-2 w-2 rounded-full bg-red-500 shadow-[0_0_18px_rgba(220,38,38,0.9)]" />
-                        Service Advisor
+                    <div className="flex flex-wrap items-center gap-3">
+                        <VoiceStatusDot />
+                        <div className="inline-flex w-fit items-center rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200">
+                            <span className="mr-2 h-2 w-2 rounded-full bg-red-500 shadow-[0_0_18px_rgba(220,38,38,0.9)]" />
+                            Service Advisor
+                        </div>
                     </div>
                 </div>
             </header>
@@ -185,7 +217,10 @@ export default function DashboardPage() {
                             <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
                                 <div>
                                     <p className="mb-2 text-sm font-semibold uppercase tracking-[0.32em] text-zinc-500">Customer profile</p>
-                                    <h2 className="text-3xl font-black tracking-tight text-white sm:text-4xl">{data.customer.name}</h2>
+                                    <div className="flex flex-wrap items-center gap-4">
+                                        <h2 className="text-3xl font-black tracking-tight text-white sm:text-4xl">{data.customer.name}</h2>
+                                        <OutboundCallButton phone={data.customer.phone} userName={data.customer.name} />
+                                    </div>
                                     <div className="mt-4 flex flex-wrap gap-3 text-sm text-zinc-300">
                                         <span className="rounded-full border border-zinc-800 bg-zinc-950 px-4 py-2">{data.customer.phone}</span>
                                         <span className="rounded-full border border-zinc-800 bg-zinc-950 px-4 py-2">{data.customer.email}</span>
@@ -389,6 +424,8 @@ export default function DashboardPage() {
                                         ))}
                                     </div>
                                 </section>
+
+                                <CallHistory />
 
                                 <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-6">
                                     <p className="text-sm font-semibold uppercase tracking-[0.32em] text-zinc-500">Advisor note</p>

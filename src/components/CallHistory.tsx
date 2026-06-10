@@ -1,0 +1,147 @@
+'use client';
+
+import { useCallback, useEffect, useState } from 'react';
+import { useVoice } from '@/providers/VoiceProvider';
+
+type CallEntry = {
+    id: string;
+    direction: 'inbound' | 'outbound';
+    callType?: string;
+    customerId?: string;
+    customerName?: string;
+    phone?: string;
+    status: 'initiated' | 'in_progress' | 'completed' | 'failed' | 'no_answer';
+    duration?: number;
+    summary?: string;
+    timestamp: string;
+};
+
+const REFRESH_INTERVAL_MS = 10_000;
+
+const statusStyles: Record<CallEntry['status'], string> = {
+    initiated: 'border-blue-500/40 bg-blue-500/10 text-blue-200',
+    in_progress: 'border-amber-500/40 bg-amber-500/10 text-amber-200',
+    completed: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200',
+    failed: 'border-red-500/40 bg-red-500/10 text-red-200',
+    no_answer: 'border-zinc-700 bg-zinc-950 text-zinc-300',
+};
+
+const directionLabel: Record<CallEntry['direction'], string> = {
+    inbound: 'Inbound',
+    outbound: 'Outbound',
+};
+
+function formatDuration(seconds?: number) {
+    if (!seconds && seconds !== 0) return 'Live';
+    if (seconds < 60) return `${seconds}s`;
+    const mins = Math.floor(seconds / 60);
+    const remainder = seconds % 60;
+    return remainder === 0 ? `${mins}m` : `${mins}m ${remainder}s`;
+}
+
+function formatTime(iso: string) {
+    try {
+        return new Date(iso).toLocaleTimeString('en-CA', { hour: '2-digit', minute: '2-digit' });
+    } catch {
+        return iso;
+    }
+}
+
+export function CallHistory({ customerId }: { customerId?: string }) {
+    const { voiceServiceUrl, lastEvent } = useVoice();
+    const [calls, setCalls] = useState<CallEntry[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+
+    const load = useCallback(async () => {
+        if (!voiceServiceUrl) return;
+        try {
+            const response = await fetch(`${voiceServiceUrl}/calls/history`, { cache: 'no-store' });
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            const payload = (await response.json()) as { calls?: CallEntry[] };
+            setCalls(payload.calls ?? []);
+            setError(null);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Failed to load call history');
+        } finally {
+            setLoading(false);
+        }
+    }, [voiceServiceUrl]);
+
+    useEffect(() => {
+        void load();
+        const interval = setInterval(() => {
+            void load();
+        }, REFRESH_INTERVAL_MS);
+        return () => clearInterval(interval);
+    }, [load]);
+
+    useEffect(() => {
+        if (!lastEvent) return;
+        if (lastEvent.type === 'INCOMING_CALL' || lastEvent.type === 'CALL_ENDED' || lastEvent.type === 'OUTBOUND_INITIATED') {
+            void load();
+        }
+    }, [lastEvent, load]);
+
+    const filtered = customerId
+        ? calls.filter((call) => call.customerId === customerId)
+        : calls;
+
+    return (
+        <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-6">
+            <div className="mb-4 flex items-center justify-between gap-3">
+                <div>
+                    <p className="text-sm font-semibold uppercase tracking-[0.32em] text-zinc-500">Aria call activity</p>
+                    <h3 className="mt-2 text-xl font-black text-white">{customerId ? 'This customer' : 'Recent calls'}</h3>
+                </div>
+                <button
+                    type="button"
+                    onClick={() => void load()}
+                    className="rounded-full border border-zinc-700 bg-zinc-950 px-3 py-1 text-xs font-bold uppercase tracking-[0.18em] text-zinc-300 transition hover:border-red-500 hover:text-white"
+                >
+                    Refresh
+                </button>
+            </div>
+
+            {loading && filtered.length === 0 && (
+                <p className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-950 px-4 py-6 text-center text-sm text-zinc-400">Loading call history…</p>
+            )}
+            {!loading && filtered.length === 0 && (
+                <p className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-950 px-4 py-6 text-center text-sm text-zinc-400">
+                    {error ? `Voice service unavailable (${error})` : 'No calls yet. When Aria takes a call it will appear here.'}
+                </p>
+            )}
+
+            <ul className="space-y-2">
+                {filtered.slice(0, 8).map((call) => (
+                    <li key={call.id} className="rounded-2xl border border-zinc-800 bg-zinc-950 px-4 py-3">
+                        <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0">
+                                <p className="truncate text-sm font-black text-white">
+                                    {call.customerName ?? call.phone ?? 'Unknown caller'}
+                                </p>
+                                <p className="text-xs text-zinc-400">
+                                    {directionLabel[call.direction]}
+                                    {call.callType ? ` · ${call.callType.replace(/_/g, ' ')}` : ''}
+                                    {' · '}
+                                    {formatTime(call.timestamp)}
+                                </p>
+                            </div>
+                            <div className="flex flex-col items-end gap-1">
+                                <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] ${statusStyles[call.status]}`}>
+                                    {call.status.replace('_', ' ')}
+                                </span>
+                                <span className="text-xs font-semibold text-zinc-300">{formatDuration(call.duration)}</span>
+                            </div>
+                        </div>
+                        {call.summary && (
+                            <p className="mt-2 line-clamp-2 text-xs text-zinc-400">{call.summary}</p>
+                        )}
+                    </li>
+                ))}
+            </ul>
+        </section>
+    );
+}
