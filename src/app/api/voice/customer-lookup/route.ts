@@ -111,7 +111,10 @@ function hasValidApiKey(request: Request) {
 
     const authorization = request.headers.get('authorization');
     const bearerToken = authorization?.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : '';
-    const apiKey = request.headers.get('x-api-key') ?? request.headers.get('x-pitlane-api-key') ?? bearerToken;
+    const apiKey = request.headers.get('x-pitlane-voice-key')
+        ?? request.headers.get('x-api-key')
+        ?? request.headers.get('x-pitlane-api-key')
+        ?? bearerToken;
 
     return apiKey === expectedApiKey;
 }
