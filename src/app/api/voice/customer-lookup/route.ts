@@ -104,8 +104,24 @@ function normalizePhone(phone: string) {
     return phone.replace(/\D/g, '');
 }
 
+function hasValidApiKey(request: Request) {
+    const expectedApiKey = process.env.PITLANE_VOICE_API_KEY;
+
+    if (!expectedApiKey) return true;
+
+    const authorization = request.headers.get('authorization');
+    const bearerToken = authorization?.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : '';
+    const apiKey = request.headers.get('x-api-key') ?? request.headers.get('x-pitlane-api-key') ?? bearerToken;
+
+    return apiKey === expectedApiKey;
+}
+
 export async function POST(request: Request) {
     let phone = '';
+
+    if (!hasValidApiKey(request)) {
+        return NextResponse.json({ message: 'Unauthorized' }, { status: 401 });
+    }
 
     try {
         const body = await request.json();
