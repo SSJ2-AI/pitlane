@@ -17,6 +17,7 @@ const sulaimProfile = {
     vehicles: [
         {
             id: 'veh_005a',
+            display: '2023 Porsche 911 GT3 RS',
             vin: 'WP0AA2A98NS820011',
             year: 2023,
             make: 'Porsche',
@@ -57,6 +58,7 @@ const jamesProfile = {
     vehicles: [
         {
             id: 'veh_001a',
+            display: '2021 Porsche Cayenne S',
             vin: 'WP1AA2AY4MDA12345',
             year: 2021,
             make: 'Porsche',
@@ -104,6 +106,14 @@ function normalizePhone(phone: string) {
     return phone.replace(/\D/g, '');
 }
 
+function lookupCustomer(phone: string) {
+    const digitsOnly = normalizePhone(phone);
+
+    if (digitsOnly.length < 10) return null;
+
+    return [sulaimProfile, jamesProfile].find((profile) => normalizePhone(profile.phone).endsWith(digitsOnly.slice(-10))) ?? null;
+}
+
 function hasValidApiKey(request: Request) {
     const expectedApiKey = process.env.PITLANE_VOICE_API_KEY;
 
@@ -119,22 +129,12 @@ function hasValidApiKey(request: Request) {
     return apiKey === expectedApiKey;
 }
 
-export async function POST(request: Request) {
-    let phone = '';
+function unauthorized() {
+    return NextResponse.json({ message: 'Unauthorized' }, { status: 401 });
+}
 
-    if (!hasValidApiKey(request)) {
-        return NextResponse.json({ message: 'Unauthorized' }, { status: 401 });
-    }
-
-    try {
-        const body = await request.json();
-        phone = typeof body?.phone === 'string' ? body.phone : '';
-    } catch {
-        phone = '';
-    }
-
-    const digitsOnly = normalizePhone(phone);
-    const customer = [sulaimProfile, jamesProfile].find((profile) => normalizePhone(profile.phone).endsWith(digitsOnly.slice(-10)));
+function customerResponse(phone: string) {
+    const customer = lookupCustomer(phone);
 
     if (!customer) {
         return NextResponse.json(
@@ -144,4 +144,30 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json({ customer });
+}
+
+export async function GET(request: Request) {
+    if (!hasValidApiKey(request)) {
+        return unauthorized();
+    }
+
+    const { searchParams } = new URL(request.url);
+    return customerResponse(searchParams.get('phone') ?? '');
+}
+
+export async function POST(request: Request) {
+    let phone = '';
+
+    if (!hasValidApiKey(request)) {
+        return unauthorized();
+    }
+
+    try {
+        const body = await request.json();
+        phone = typeof body?.phone === 'string' ? body.phone : '';
+    } catch {
+        phone = '';
+    }
+
+    return customerResponse(phone);
 }
