@@ -133,17 +133,48 @@ function unauthorized() {
     return NextResponse.json({ message: 'Unauthorized' }, { status: 401 });
 }
 
+function formatCustomerPayload(customer: typeof sulaimProfile | typeof jamesProfile) {
+    return {
+        found: true,
+        customer: {
+            id: customer.id,
+            firstName: customer.firstName,
+            lastName: customer.lastName,
+            phone: customer.phone,
+            email: customer.email,
+            loyaltyTier: customer.loyaltyTier,
+            notes: customer.notes,
+        },
+        vehicles: customer.vehicles.map((vehicle) => ({
+            id: vehicle.id,
+            display: vehicle.display,
+            vin: vehicle.vin,
+            year: vehicle.year,
+            make: vehicle.make,
+            model: vehicle.model,
+            trim: vehicle.trim,
+            color: vehicle.color,
+            mileage: vehicle.mileage,
+            licensePlate: 'licensePlate' in vehicle ? vehicle.licensePlate : undefined,
+        })),
+        openRepairOrders: customer.openRepairOrders,
+        nextAppointment: customer.upcomingAppointments[0] ?? null,
+        upcomingAppointments: customer.upcomingAppointments,
+        openRecalls: customer.openRecalls,
+    };
+}
+
 function customerResponse(phone: string) {
     const customer = lookupCustomer(phone);
 
     if (!customer) {
         return NextResponse.json(
-            { customer: null, message: 'No customer found for this number - this may be a new customer.' },
+            { found: false, customer: null, vehicles: [], openRepairOrders: [], nextAppointment: null, openRecalls: [], message: 'No customer found for this number - this may be a new customer.' },
             { status: 404 },
         );
     }
 
-    return NextResponse.json({ customer });
+    return NextResponse.json(formatCustomerPayload(customer));
 }
 
 export async function GET(request: Request) {
