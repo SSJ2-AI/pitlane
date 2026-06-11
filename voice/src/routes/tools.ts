@@ -14,6 +14,7 @@ import {
   isSupabaseConfigured,
   queueCdkSync,
 } from '../lib/supabase'
+import { dispatchSms, type SmsMessageType } from '../lib/sms'
 
 const router = Router()
 
@@ -298,6 +299,99 @@ router.post('/warranty', (req: Request, res: Response) => {
   return handleWarranty(body.vehicle_id, res)
 })
 
+// ─── Phase 5: send-sms ───────────────────────────────────────────────────────
+// POST /tools/send-sms (also GET for ElevenLabs query-param tool config)
+// Aria invokes this mid-call to send confirmations / updates to the caller.
+//   { customer_id, message_type, custom_text?, call_id?, context? }
+// message_type: appointment_confirmation | loaner_confirmed | car_ready |
+//               appointment_reminder | parts_arrived | update | custom
+
+const SMS_TYPES: SmsMessageType[] = [
+  'appointment_confirmation',
+  'appointment_reminder',
+  'loaner_confirmed',
+  'car_ready',
+  'parts_arrived',
+  'update',
+  'custom',
+]
+
+interface SendSmsToolBody {
+  customer_id: string
+  message_type?: string
+  custom_text?: string
+  call_id?: string
+  context?: Record<string, string | number | undefined | null>
+}
+
+router.post('/send-sms', (req: Request, res: Response): void => {
+  void handleSendSms(req.body as SendSmsToolBody, res)
+})
+
+router.get('/send-sms', (req: Request, res: Response): void => {
+  void handleSendSms(
+    {
+      customer_id: req.query.customer_id as string,
+      message_type: req.query.message_type as string | undefined,
+      custom_text: req.query.custom_text as string | undefined,
+      call_id: req.query.call_id as string | undefined,
+    },
+    res,
+  )
+})
+
+async function handleSendSms(input: SendSmsToolBody, res: Response): Promise<Response> {
+  const messageType = (input.message_type ?? 'update') as SmsMessageType
+  console.log(
+    `[Tool] send-sms customer=${input.customer_id} type=${messageType} call=${input.call_id ?? 'n/a'}`,
+  )
+
+  if (!input.customer_id) {
+    return res.status(400).json({ sent: false, error: 'customer_id is required' })
+  }
+  if (!SMS_TYPES.includes(messageType)) {
+    return res.status(400).json({ sent: false, error: `message_type must be one of ${SMS_TYPES.join(', ')}` })
+  }
+  const customer = lookupById(input.customer_id)
+  if (!customer) {
+    return res.status(404).json({ sent: false, error: 'Customer not found' })
+  }
+
+  if (input.call_id) {
+    recordEvent(input.call_id, 'NOTE_ADDED', {
+      source: 'aria',
+      action: 'send_sms',
+      message_type: messageType,
+    })
+  }
+
+  const callLogId = input.call_id && isSupabaseConfigured()
+    ? await getOrCreateCallLogIdForConversation(input.call_id, {
+        customerId: customer.id,
+        phone: customer.phone,
+      })
+    : null
+
+  const result = await dispatchSms({
+    customer_id: customer.id,
+    to_phone: customer.phone,
+    message_type: messageType,
+    custom_text: input.custom_text ?? null,
+    context: input.context ?? {},
+    call_log_id: callLogId,
+  })
+
+  return res.json({
+    sent: result.sent,
+    status: result.status,
+    message_type: result.message_type,
+    sms_log_id: result.sms_log_id,
+    dry_run: result.dry_run,
+    rendered_message: result.rendered_message,
+    failure_reason: result.failure_reason,
+  })
+}
+
 // ─── Shared appointment booking handler ───────────────────────────────────────
 
 interface BookAppointmentInput {
@@ -436,6 +530,42 @@ async function handleBookAppointment(input: BookAppointmentInput, res: Response)
     }
   }
 
+  // 4. Auto-fire the appointment_confirmation SMS as soon as the booking
+  //    lands. dispatchSms handles consent + Supabase log + Twilio dispatch;
+  //    when Twilio creds are unset this is a dry-run that still logs intent.
+  //    We don't await this in a way that blocks the response — fire and
+  //    forget but capture the promise so Node doesn't unhandled-reject.
+  let smsResultSummary: { sent: boolean; status: string; dry_run: boolean; sms_log_id?: string | null } | null = null
+  try {
+    const smsResult = await dispatchSms({
+      customer_id: customer.id,
+      to_phone: customer.phone,
+      message_type: 'appointment_confirmation',
+      context: {
+        date,
+        time,
+        service_type: serviceType,
+        advisor,
+        confirmation_number: confirmationNumber,
+      },
+      call_log_id: callId && isSupabaseConfigured()
+        ? await getOrCreateCallLogIdForConversation(callId, {
+            customerId: customer.id,
+            phone: customer.phone,
+          })
+        : null,
+      appointment_id: supabaseAppointmentId,
+    })
+    smsResultSummary = {
+      sent: smsResult.sent,
+      status: smsResult.status,
+      dry_run: smsResult.dry_run,
+      sms_log_id: smsResult.sms_log_id,
+    }
+  } catch (err) {
+    console.error('[Tool] book-appointment: SMS dispatch failed (non-fatal):', err instanceof Error ? err.message : err)
+  }
+
   return res.json({
     confirmed: true,
     confirmation_number: confirmationNumber,
@@ -446,6 +576,7 @@ async function handleBookAppointment(input: BookAppointmentInput, res: Response)
     message:
       `Your ${serviceType} appointment is confirmed for ${date} at ${time} with ${advisor}. ` +
       `Estimated duration: ${durationHours} hours. Confirmation: ${confirmationNumber}.`,
+    sms: smsResultSummary,
     persistence: isSupabaseConfigured() ? 'supabase' : 'in-memory',
   })
 }

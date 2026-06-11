@@ -183,6 +183,60 @@ export async function insertUpsell(row: UpsellInsert): Promise<string | null> {
   }
 }
 
+// ─── SMS helpers (Phase 5) ────────────────────────────────────────────────────
+
+export type SmsStatus = 'queued' | 'sent' | 'delivered' | 'failed' | 'undelivered' | 'skipped'
+
+export interface SmsLogInsert {
+  customer_id?: string | null
+  to_phone: string
+  from_phone?: string | null
+  message: string
+  message_type: string
+  twilio_sid?: string | null
+  status: SmsStatus
+  failure_reason?: string | null
+  call_log_id?: string | null
+  appointment_id?: string | null
+  loaner_request_id?: string | null
+}
+
+export async function insertSmsLog(row: SmsLogInsert): Promise<string | null> {
+  const client = getSupabase()
+  if (!client) return null
+  try {
+    const { data, error } = await client.from('sms_log').insert(row).select('id').single()
+    if (error) throw error
+    return (data as { id: string } | null)?.id ?? null
+  } catch (err) {
+    console.error('[Supabase] insertSmsLog failed:', err instanceof Error ? err.message : err)
+    return null
+  }
+}
+
+/**
+ * Returns true when we have explicit consent OR no record yet (which we treat
+ * as implicitly opted-in for the demo). Returns false ONLY for customers who
+ * have explicitly opted out — i.e. a row with opted_in = false.
+ */
+export async function hasSmsConsent(customerId: string): Promise<boolean> {
+  const client = getSupabase()
+  if (!client) return true // demo path: dry-run send is fine, log it anyway
+  try {
+    const { data, error } = await client
+      .from('sms_consent')
+      .select('opted_in')
+      .eq('customer_id', customerId)
+      .maybeSingle()
+    if (error) throw error
+    if (!data) return true // no record yet -> implicit opt-in
+    return Boolean((data as { opted_in: boolean }).opted_in)
+  } catch (err) {
+    console.error('[Supabase] hasSmsConsent failed:', err instanceof Error ? err.message : err)
+    return true
+  }
+}
+
 export interface CdkSyncEnqueue {
   entity_type: 'appointment' | 'upsell' | 'loaner_request' | 'note'
   entity_id: string
