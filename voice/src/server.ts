@@ -8,6 +8,7 @@ import toolsRouter from './routes/tools'
 import callsRouter from './routes/calls'
 import eventsRouter from './routes/events'
 import webhookRouter from './routes/webhook'
+import smsRouter from './routes/sms'
 import { setGlobalNextCaller, setPhoneOverride, listOverrides } from './mock/sessionOverrides'
 import { MOCK_CUSTOMERS } from './mock/customers'
 
@@ -44,14 +45,43 @@ app.get('/dashboard', (_req, res) => {
 })
 app.get('/', (_req, res) => res.redirect('/dashboard'))
 
-// Health check — Railway uses this
+// Health check — Railway uses this. Includes build_stamp + git_sha so we can
+// tell deploys apart by inspection ("is the new code actually live?"). The
+// build_stamp is captured at module load so it reflects when this process
+// started, which is when Railway last cycled the deploy.
+const BUILD_STARTED_AT = new Date().toISOString()
+const PKG_VERSION: string = (() => {
+  try {
+    return (require('../package.json') as { version: string }).version
+  } catch {
+    return 'unknown'
+  }
+})()
+
 app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     service: 'pitlane-voice',
-    version: '1.0.0',
+    version: PKG_VERSION,
+    build_started_at: BUILD_STARTED_AT,
+    git_sha: process.env.RAILWAY_GIT_COMMIT_SHA ?? process.env.GIT_COMMIT_SHA ?? null,
     timestamp: new Date().toISOString(),
     mode: config.useMockData ? 'mock' : 'live',
+    routes: {
+      pre_call_webhook: '/webhook/pre-call',
+      post_call_webhook: '/webhook/post-call',
+      tools: [
+        '/tools/customer-lookup',
+        '/tools/book-appointment',
+        '/tools/log-upsell',
+        '/tools/request-loaner',
+        '/tools/check-ro-status',
+        '/tools/repair-eta/:ro_id',
+        '/tools/warranty/:vehicle_id',
+        '/tools/send-sms',
+      ],
+      sms: '/sms/send',
+    },
   })
 })
 
@@ -68,6 +98,10 @@ app.use('/calls', callsRouter)
 
 // ElevenLabs post-call events
 app.use('/events', eventsRouter)
+
+// Phase 5: SMS dispatch (Twilio). Dry-runs gracefully when TWILIO_* env vars
+// are unset; consent check + Supabase log run regardless.
+app.use('/sms', smsRouter)
 
 // ─── Demo: list all available mock CDK customers ─────────────────────────────
 app.get('/demo/customers', (_req, res) => {
