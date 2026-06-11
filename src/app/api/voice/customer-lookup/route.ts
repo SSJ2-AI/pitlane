@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { isFortellisConfigured, lookupCustomerByPhone as lookupFortellisCustomer, type FortellisCustomer } from '@/lib/fortellis';
 
 const sulaimProfile = {
     id: 'cust_005',
@@ -164,17 +165,107 @@ function formatCustomerPayload(customer: typeof sulaimProfile | typeof jamesProf
     };
 }
 
-function customerResponse(phone: string) {
-    const customer = lookupCustomer(phone);
+function formatFortellisPayload(customer: FortellisCustomer) {
+    const primary = customer.upcomingAppointments[0];
+    return {
+        found: true,
+        source: 'fortellis' as const,
+        customer: {
+            id: customer.id,
+            firstName: customer.firstName,
+            lastName: customer.lastName,
+            phone: customer.phone,
+            email: customer.email,
+            loyaltyTier: customer.loyaltyTier,
+            preferredLanguage: customer.preferredLanguage ?? 'en',
+            notes: customer.notes,
+        },
+        vehicles: customer.vehicles.map((vehicle) => ({
+            id: vehicle.id,
+            display: [vehicle.year, vehicle.make, vehicle.model, vehicle.trim].filter(Boolean).join(' ').trim(),
+            vin: vehicle.vin,
+            year: vehicle.year,
+            make: vehicle.make,
+            model: vehicle.model,
+            trim: vehicle.trim,
+            color: vehicle.color,
+            mileage: vehicle.mileage,
+            licensePlate: vehicle.licensePlate,
+        })),
+        openRepairOrders: customer.openRepairOrders.map((ro) => ({
+            id: ro.roNumber,
+            roNumber: ro.roNumber,
+            status: ro.status,
+            serviceType: ro.description,
+            description: ro.description,
+            advisorName: ro.advisorName,
+            estimatedCompletion: ro.estimatedCompletion,
+            totalEstimate: ro.totalEstimate,
+            vehicleId: ro.vehicleId,
+        })),
+        nextAppointment: primary
+            ? {
+                id: primary.id,
+                date: primary.date,
+                time: primary.time,
+                serviceType: primary.serviceType,
+                advisorName: primary.advisorName,
+                status: primary.status,
+                vehicleId: primary.vehicleId,
+            }
+            : null,
+        upcomingAppointments: customer.upcomingAppointments,
+        openRecalls: customer.openRecalls.map((recall) => ({
+            id: recall.nhtsa_id,
+            nhtsa_id: recall.nhtsa_id,
+            component: recall.component,
+            summary: recall.description,
+            description: recall.description,
+            remedy: recall.remedy,
+            status: recall.status,
+        })),
+        lastVisit: customer.lastVisit,
+    };
+}
 
-    if (!customer) {
+async function customerResponse(phone: string) {
+    // Phase 4 — try real Fortellis CDK first when configured. Falls back to
+    // hardcoded demo data so the POC keeps working in dealerships that
+    // haven't connected their CDK yet.
+    if (isFortellisConfigured()) {
+        const fortellisCustomer = await lookupFortellisCustomer(phone);
+        if (fortellisCustomer) {
+            return NextResponse.json(formatFortellisPayload(fortellisCustomer));
+        }
+        // Configured but lookup returned nothing — treat as not-found from CDK
+        // (do NOT fall through to mocks for real dealerships, that would be
+        // misleading; just say no record).
         return NextResponse.json(
-            { found: false, customer: null, vehicles: [], openRepairOrders: [], nextAppointment: null, openRecalls: [], message: 'No customer found for this number - this may be a new customer.' },
+            {
+                found: false,
+                source: 'fortellis' as const,
+                customer: null,
+                vehicles: [],
+                openRepairOrders: [],
+                nextAppointment: null,
+                openRecalls: [],
+                message: 'No customer found for this number - this may be a new customer.',
+            },
             { status: 404 },
         );
     }
 
-    return NextResponse.json(formatCustomerPayload(customer));
+    // Demo / unconfigured fallback path.
+    const customer = lookupCustomer(phone);
+
+    if (!customer) {
+        return NextResponse.json(
+            { found: false, source: 'mock' as const, customer: null, vehicles: [], openRepairOrders: [], nextAppointment: null, openRecalls: [], message: 'No customer found for this number - this may be a new customer.' },
+            { status: 404 },
+        );
+    }
+
+    return NextResponse.json({ ...formatCustomerPayload(customer), source: 'mock' as const });
 }
 
 export async function GET(request: Request) {

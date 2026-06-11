@@ -70,12 +70,13 @@ The repo has two deployable units:
 
 ## Phase roadmap
 
-| Phase | Scope |
-|---|---|
-| 1 (this PR) | Foundation: event store, dashboard auto-load, call history, outbound button, status dot |
-| 2 | Note + appointment write-back endpoints on PitLane, live in-call panel (intent / proposed booking), advisor "directive to Aria" channel using ElevenLabs `conversation_initiation_client_data` |
-| 3 | Loaner workflow: `request_loaner` tool, `LOANER_REQUESTED` WS event, loaner queue widget on dashboard, Approve/Decline-with-counter, email + ICS calendar invite, callback from Aria on counter |
-| 4 | Replace JSON event store with real Fortellis/CDK read+write per dealership |
+| Phase | Scope | Status |
+|---|---|---|
+| 1 | Foundation: voice event store, dashboard auto-load, call history, outbound button, status dot | ✅ on `main` |
+| 2 | Polished call history panel: customer, time, duration in seconds, direction, summary | ✅ |
+| 3 | "Call Customer" dropdown with 4 call types (appointment reminder, recall, follow-up, parts ready) calling the voice service directly with `customer_id` + `call_type` | ✅ |
+| 4 | Real CDK data via `src/lib/fortellis.ts` (OAuth client_credentials + Subscription-Id) in `/api/voice/customer-lookup`. Falls back to mock data when env vars are absent. | ✅ scaffold; needs real credentials to go live |
+| Next | Loaner workflow, email + ICS calendar invites, advisor "directive to Aria" mid-call context injection, write-back of appointments/notes from Aria to CDK | ⏭ |
 
 ## Development
 
@@ -95,6 +96,18 @@ PITLANE_VOICE_API_KEY=<shared secret with voice service>
 ELEVENLABS_API_KEY=<for outbound calls via /api/voice/calls/outbound>
 ELEVENLABS_AGENT_ID=agent_2701ktpgkyr7f37vq8dmgxjw4bkt
 ELEVENLABS_PHONE_NUMBER_ID=phnum_0301ktpjb9pvfwbvwkezwrt5c1c7
+
+# ─── Phase 4: Fortellis / CDK ─────────────────────────────────────────
+# When all three are set, /api/voice/customer-lookup queries Fortellis
+# instead of returning hardcoded mock data. When unset, the dashboard
+# silently falls back to the demo data so the POC keeps working.
+FORTELLIS_CLIENT_ID=<>
+FORTELLIS_CLIENT_SECRET=<>
+FORTELLIS_SUBSCRIPTION_ID=<per-dealership subscription id>
+
+# Optional overrides (defaults shown):
+# FORTELLIS_TOKEN_URL=https://identity.fortellis.io/oauth2/aus1p1ixy7YL8cMq02p7/v1/token
+# FORTELLIS_CUSTOMER_API_URL=https://api.fortellis.io/cdkservices/customer-information/v1/customers
 ```
 
 ### Voice service
