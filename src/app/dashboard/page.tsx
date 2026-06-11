@@ -3,8 +3,10 @@
 import Link from 'next/link';
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CallHistory } from '@/components/CallHistory';
+import { CustomerUpsellsPanel } from '@/components/CustomerUpsellsPanel';
 import { OutboundCallButton } from '@/components/OutboundCallButton';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
+import { WarrantyBadge } from '@/components/WarrantyBadge';
 import { useVoice } from '@/providers/VoiceProvider';
 
 type DeclinedService = {
@@ -187,6 +189,12 @@ export default function DashboardPage() {
                             className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white"
                         >
                             Calls
+                        </Link>
+                        <Link
+                            href="/service-desk"
+                            className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white"
+                        >
+                            Service desk
                         </Link>
                         <div className="inline-flex w-fit items-center rounded-full border border-red-500/40 bg-red-600/15 px-4 py-2 text-sm font-semibold text-red-200">
                             <span className="mr-2 h-2 w-2 rounded-full bg-red-500 shadow-[0_0_18px_rgba(220,38,38,0.9)]" />
@@ -437,7 +445,22 @@ export default function DashboardPage() {
                                     </div>
                                 </section>
 
+                                <WarrantyBadge vehicleId={activeVehicle.id} />
+
+                                <CustomerUpsellsPanel customerId={data.customer.id} />
+
                                 <CallHistory customerId={data.customer.id} />
+
+                                {data.customer.id && (
+                                    <div className="flex justify-end">
+                                        <Link
+                                            href={`/calls?customer_id=${encodeURIComponent(data.customer.id)}`}
+                                            className="text-xs font-semibold uppercase tracking-[0.22em] text-red-300 transition hover:text-red-200"
+                                        >
+                                            Open full call log →
+                                        </Link>
+                                    </div>
+                                )}
 
                                 {data.customer.id && (
                                     <CallHistory title="All recent calls" />
