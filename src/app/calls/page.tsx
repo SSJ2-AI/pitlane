@@ -1,7 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { FormEvent, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import type {
     AppointmentRow,
     CallLogRow,
@@ -89,16 +90,36 @@ function callerLabel(call: CallLogRow) {
 }
 
 export default function CallsPage() {
+    // useSearchParams forces this subtree into a client boundary which
+    // Next.js requires to be wrapped in Suspense.
+    return (
+        <Suspense fallback={<CallsPageFallback />}>
+            <CallsPageInner />
+        </Suspense>
+    );
+}
+
+function CallsPageFallback() {
+    return (
+        <main className="min-h-screen bg-[#09090b] text-zinc-100">
+            <div className="mx-auto max-w-7xl px-5 py-16 text-center text-sm text-zinc-400 lg:px-8">Loading call log…</div>
+        </main>
+    );
+}
+
+function CallsPageInner() {
+    const searchParams = useSearchParams();
+
     const [calls, setCalls] = useState<CallLogRow[]>([]);
     const [total, setTotal] = useState(0);
     const [loading, setLoading] = useState(true);
     const [persistence, setPersistence] = useState<'supabase' | 'none'>('none');
     const [error, setError] = useState<string | null>(null);
 
-    const [customerFilter, setCustomerFilter] = useState('');
-    const [outcomeFilter, setOutcomeFilter] = useState<CallOutcome | ''>('');
-    const [since, setSince] = useState('');
-    const [until, setUntil] = useState('');
+    const [customerFilter, setCustomerFilter] = useState(() => searchParams.get('customer_id') ?? '');
+    const [outcomeFilter, setOutcomeFilter] = useState<CallOutcome | ''>(() => (searchParams.get('outcome') as CallOutcome) ?? '');
+    const [since, setSince] = useState(() => searchParams.get('since') ?? '');
+    const [until, setUntil] = useState(() => searchParams.get('until') ?? '');
 
     const [selectedId, setSelectedId] = useState<string | null>(null);
     const [detail, setDetail] = useState<CallDetailResponse | null>(null);
