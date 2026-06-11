@@ -62,6 +62,7 @@ export function getSupabase(): SupabaseClient | null {
 export interface CallLogUpsert {
   caller_phone: string
   customer_id?: string | null
+  dealer_id?: string | null
   call_sid?: string | null
   conversation_id?: string | null
   direction?: 'inbound' | 'outbound'
@@ -114,6 +115,7 @@ export interface LoanerRequestInsert {
   call_log_id?: string | null
   appointment_id?: string | null
   customer_id: string
+  dealer_id?: string | null
   requested_date?: string | null
   loaner_preferred?: string | null
   notes?: string | null
@@ -137,6 +139,7 @@ export async function insertLoanerRequest(row: LoanerRequestInsert): Promise<str
 export interface AppointmentInsert {
   call_log_id?: string | null
   customer_id: string
+  dealer_id?: string | null
   vehicle_id: string
   date: string                       // YYYY-MM-DD
   time: string                       // HH:MM(:SS)
@@ -163,6 +166,7 @@ export async function insertAppointment(row: AppointmentInsert): Promise<string 
 export interface UpsellInsert {
   call_log_id?: string | null
   customer_id: string
+  dealer_id?: string | null
   vehicle_id: string
   upsell_type: string
   description?: string | null
@@ -189,6 +193,7 @@ export type SmsStatus = 'queued' | 'sent' | 'delivered' | 'failed' | 'undelivere
 
 export interface SmsLogInsert {
   customer_id?: string | null
+  dealer_id?: string | null
   to_phone: string
   from_phone?: string | null
   message: string
@@ -240,6 +245,7 @@ export async function hasSmsConsent(customerId: string): Promise<boolean> {
 export interface CdkSyncEnqueue {
   entity_type: 'appointment' | 'upsell' | 'loaner_request' | 'note'
   entity_id: string
+  dealer_id?: string | null
   payload: Record<string, unknown>
 }
 
@@ -274,9 +280,35 @@ export async function queueCdkSync(row: CdkSyncEnqueue): Promise<string | null> 
 //
 // Returns the call_logs.id (uuid) which is what the FK columns expect.
 
+/**
+ * Returns the dealer_id stored on the call_logs row matching this conversation
+ * (set by the pre-call webhook). Returns null when Supabase isn't configured,
+ * when no row matches, or when dealer_id is unset. Caller defaults to
+ * DEFAULT_DEALER on null.
+ */
+export async function getDealerIdForConversation(conversationId: string): Promise<string | null> {
+  const client = getSupabase()
+  if (!client) return null
+  try {
+    const { data, error } = await client
+      .from('call_logs')
+      .select('dealer_id')
+      .eq('conversation_id', conversationId)
+      .maybeSingle()
+    if (error) {
+      console.error('[Supabase] getDealerIdForConversation error:', error.message)
+      return null
+    }
+    return (data as { dealer_id: string | null } | null)?.dealer_id ?? null
+  } catch (err) {
+    console.error('[Supabase] getDealerIdForConversation threw:', err instanceof Error ? err.message : err)
+    return null
+  }
+}
+
 export async function getOrCreateCallLogIdForConversation(
   conversationId: string,
-  hints?: { customerId?: string | null; phone?: string | null },
+  hints?: { customerId?: string | null; phone?: string | null; dealerId?: string | null },
 ): Promise<string | null> {
   const client = getSupabase()
   if (!client) return null
@@ -321,6 +353,7 @@ export async function getOrCreateCallLogIdForConversation(
         conversation_id: conversationId,
         caller_phone: hints?.phone ?? 'unknown',
         customer_id: hints?.customerId ?? null,
+        dealer_id: hints?.dealerId ?? null,
         direction: 'inbound',
         status: 'in_progress',
       })

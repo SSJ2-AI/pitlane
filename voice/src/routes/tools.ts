@@ -15,6 +15,7 @@ import {
   queueCdkSync,
 } from '../lib/supabase'
 import { dispatchSms, type SmsMessageType } from '../lib/sms'
+import { resolveDealerForCall } from '../lib/dealer'
 
 const router = Router()
 
@@ -365,10 +366,13 @@ async function handleSendSms(input: SendSmsToolBody, res: Response): Promise<Res
     })
   }
 
+  const dealer = await resolveDealerForCall(input.call_id)
+
   const callLogId = input.call_id && isSupabaseConfigured()
     ? await getOrCreateCallLogIdForConversation(input.call_id, {
         customerId: customer.id,
         phone: customer.phone,
+        dealerId: dealer.id,
       })
     : null
 
@@ -378,6 +382,7 @@ async function handleSendSms(input: SendSmsToolBody, res: Response): Promise<Res
     message_type: messageType,
     custom_text: input.custom_text ?? null,
     context: input.context ?? {},
+    dealer,
     call_log_id: callLogId,
   })
 
@@ -490,19 +495,26 @@ async function handleBookAppointment(input: BookAppointmentInput, res: Response)
     })
   }
 
-  // 3. Persist to Supabase + queue CDK sync (no-ops when not configured).
+  // 3. Resolve which dealer owns this call (set by the pre-call webhook on
+  //    the call_logs row). Defaults to DEFAULT_DEALER when Supabase isn't
+  //    configured or the call isn't yet in the store.
+  const dealer = await resolveDealerForCall(callId)
+
+  // 4. Persist to Supabase + queue CDK sync (no-ops when not configured).
   let supabaseAppointmentId: string | null = null
   if (isSupabaseConfigured()) {
     const callLogId = callId
       ? await getOrCreateCallLogIdForConversation(callId, {
           customerId: customer.id,
           phone: customer.phone,
+          dealerId: dealer.id,
         })
       : null
 
     supabaseAppointmentId = await insertAppointment({
       call_log_id: callLogId,
       customer_id: customer.id,
+      dealer_id: dealer.id,
       vehicle_id: vehicle?.id ?? '',
       date,
       time,
@@ -517,6 +529,7 @@ async function handleBookAppointment(input: BookAppointmentInput, res: Response)
       await queueCdkSync({
         entity_type: 'appointment',
         entity_id: supabaseAppointmentId,
+        dealer_id: dealer.id,
         payload: {
           customer_id: customer.id,
           vehicle_id: vehicle?.id ?? '',
@@ -530,17 +543,18 @@ async function handleBookAppointment(input: BookAppointmentInput, res: Response)
     }
   }
 
-  // 4. Auto-fire the appointment_confirmation SMS as soon as the booking
+  // 5. Auto-fire the appointment_confirmation SMS as soon as the booking
   //    lands. dispatchSms handles consent + Supabase log + Twilio dispatch;
   //    when Twilio creds are unset this is a dry-run that still logs intent.
-  //    We don't await this in a way that blocks the response — fire and
-  //    forget but capture the promise so Node doesn't unhandled-reject.
+  //    The dealer determines the SMS sign-off ("— Porsche Toronto (…)") and
+  //    the sms_log row's dealer_id.
   let smsResultSummary: { sent: boolean; status: string; dry_run: boolean; sms_log_id?: string | null } | null = null
   try {
     const smsResult = await dispatchSms({
       customer_id: customer.id,
       to_phone: customer.phone,
       message_type: 'appointment_confirmation',
+      dealer,
       context: {
         date,
         time,
@@ -552,6 +566,7 @@ async function handleBookAppointment(input: BookAppointmentInput, res: Response)
         ? await getOrCreateCallLogIdForConversation(callId, {
             customerId: customer.id,
             phone: customer.phone,
+            dealerId: dealer.id,
           })
         : null,
       appointment_id: supabaseAppointmentId,
@@ -607,18 +622,22 @@ async function handleLogUpsell(input: LogUpsellBody, res: Response): Promise<Res
     })
   }
 
+  const dealer = await resolveDealerForCall(input.call_id)
+
   let upsellId: string | null = null
   if (isSupabaseConfigured()) {
     const callLogId = input.call_id
       ? await getOrCreateCallLogIdForConversation(input.call_id, {
           customerId: customer.id,
           phone: customer.phone,
+          dealerId: dealer.id,
         })
       : null
 
     upsellId = await insertUpsell({
       call_log_id: callLogId,
       customer_id: customer.id,
+      dealer_id: dealer.id,
       vehicle_id: input.vehicle_id,
       upsell_type: input.upsell_type,
       description: input.description ?? null,
@@ -661,18 +680,22 @@ async function handleRequestLoaner(input: RequestLoanerBody, res: Response): Pro
     })
   }
 
+  const dealer = await resolveDealerForCall(input.call_id)
+
   let loanerId: string | null = null
   if (isSupabaseConfigured()) {
     const callLogId = input.call_id
       ? await getOrCreateCallLogIdForConversation(input.call_id, {
           customerId: customer.id,
           phone: customer.phone,
+          dealerId: dealer.id,
         })
       : null
 
     loanerId = await insertLoanerRequest({
       call_log_id: callLogId,
       customer_id: customer.id,
+      dealer_id: dealer.id,
       requested_date:
         input.appointment_date ?? customer.upcomingAppointments[0]?.date ?? null,
       loaner_preferred: input.loaner_preferred ?? null,

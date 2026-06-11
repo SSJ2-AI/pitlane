@@ -11,6 +11,7 @@ import webhookRouter from './routes/webhook'
 import smsRouter from './routes/sms'
 import { setGlobalNextCaller, setPhoneOverride, listOverrides } from './mock/sessionOverrides'
 import { MOCK_CUSTOMERS } from './mock/customers'
+import { DEFAULT_DEALER } from './lib/dealer'
 
 const app = express()
 const httpServer = createServer(app)
@@ -67,6 +68,12 @@ app.get('/health', (_req, res) => {
     git_sha: process.env.RAILWAY_GIT_COMMIT_SHA ?? process.env.GIT_COMMIT_SHA ?? null,
     timestamp: new Date().toISOString(),
     mode: config.useMockData ? 'mock' : 'live',
+    default_dealer: {
+      id: DEFAULT_DEALER.id,
+      name: DEFAULT_DEALER.name,
+      brand: DEFAULT_DEALER.brand,
+      phone_number: DEFAULT_DEALER.phone_number,
+    },
     routes: {
       pre_call_webhook: '/webhook/pre-call',
       post_call_webhook: '/webhook/post-call',

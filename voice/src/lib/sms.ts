@@ -7,10 +7,10 @@
 // one consent gate and one audit trail.
 
 import { Customer } from '../types'
-import { config } from '../config'
 import { lookupById } from '../mock/customers'
 import { sendSms, getDefaultFromPhone, isTwilioConfigured } from './twilio'
 import { hasSmsConsent, insertSmsLog, isSupabaseConfigured, type SmsStatus } from './supabase'
+import { DEFAULT_DEALER, type Dealer } from './dealer'
 
 export type SmsMessageType =
     | 'appointment_confirmation'
@@ -35,6 +35,8 @@ export interface DispatchInput {
     call_log_id?: string | null
     appointment_id?: string | null
     loaner_request_id?: string | null
+    /** Multi-tenancy: the dealer this message belongs to. Defaults to DEFAULT_DEALER. */
+    dealer?: Dealer | null
 }
 
 export interface DispatchResult {
@@ -51,12 +53,14 @@ export interface DispatchResult {
 
 // ─── Templates ──────────────────────────────────────────────────────────────
 
-const SIGN_OFF = (): string =>
-    `\n— ${config.dealershipName}${config.dealershipBranch ? ` (${config.dealershipBranch})` : ''}`
+function signOff(dealer: Dealer): string {
+    return `\n— ${dealer.name}${dealer.location ? ` (${dealer.location})` : ''}`
+}
 
 function renderTemplate(
     type: SmsMessageType,
     customer: Customer | null,
+    dealer: Dealer,
     context: Record<string, string | number | undefined | null>,
     customText?: string | null,
 ): string {
@@ -88,7 +92,7 @@ function renderTemplate(
                 confirmation ? `Confirmation: ${confirmation}.` : null,
                 'Reply STOP to opt out.',
             ].filter(Boolean)
-            return lines.join(' ') + SIGN_OFF()
+            return lines.join(' ') + signOff(dealer)
         }
         case 'appointment_reminder': {
             const date = (context.date as string | undefined) ?? 'tomorrow'
@@ -96,7 +100,7 @@ function renderTemplate(
             return (
                 `Hi ${firstName}, friendly reminder of your service appointment ${date}${time ? ` at ${time}` : ''} for the ${vehicle}. ` +
                 `Reply RESCHEDULE if you need to change it.` +
-                SIGN_OFF()
+                signOff(dealer)
             )
         }
         case 'loaner_confirmed': {
@@ -106,7 +110,7 @@ function renderTemplate(
             return (
                 `Hi ${firstName}, ${loaner} will be ready for you on ${date}${time ? ` at ${time}` : ''}. ` +
                 `See you then.` +
-                SIGN_OFF()
+                signOff(dealer)
             )
         }
         case 'car_ready': {
@@ -114,7 +118,7 @@ function renderTemplate(
             return (
                 `Hi ${firstName}, great news — your ${vehicle} is ready for pickup. ` +
                 `Stop by during ${pickupHours} and we will have everything set.` +
-                SIGN_OFF()
+                signOff(dealer)
             )
         }
         case 'parts_arrived': {
@@ -122,16 +126,16 @@ function renderTemplate(
             return (
                 `Hi ${firstName}, update on your ${vehicle}: ${part} has arrived. ` +
                 `We are scheduling the repair now and will follow up to confirm timing.` +
-                SIGN_OFF()
+                signOff(dealer)
             )
         }
         case 'update': {
             const note = (context.note as string | undefined) ?? 'we have an update on your service.'
-            return `Hi ${firstName}, ${note}` + SIGN_OFF()
+            return `Hi ${firstName}, ${note}` + signOff(dealer)
         }
         case 'custom':
         default:
-            return customText ?? `Hi ${firstName}, this is ${config.dealershipName}.`
+            return customText ?? `Hi ${firstName}, this is ${dealer.name}.`
     }
 }
 
@@ -139,9 +143,10 @@ function renderTemplate(
 
 export async function dispatchSms(input: DispatchInput): Promise<DispatchResult> {
     const customer = input.customer_id ? lookupById(input.customer_id) : null
+    const dealer = input.dealer ?? DEFAULT_DEALER
     const toPhone = (input.to_phone ?? customer?.phone ?? '').trim()
     const context = input.context ?? {}
-    const renderedMessage = renderTemplate(input.message_type, customer, context, input.custom_text ?? undefined)
+    const renderedMessage = renderTemplate(input.message_type, customer, dealer, context, input.custom_text ?? undefined)
 
     if (!toPhone) {
         return {
@@ -160,6 +165,7 @@ export async function dispatchSms(input: DispatchInput): Promise<DispatchResult>
         if (!consented) {
             const smsLogId = await insertSmsLog({
                 customer_id: input.customer_id,
+                dealer_id: dealer.id,
                 to_phone: toPhone,
                 from_phone: getDefaultFromPhone(),
                 message: renderedMessage,
@@ -188,6 +194,7 @@ export async function dispatchSms(input: DispatchInput): Promise<DispatchResult>
     const smsLogId = isSupabaseConfigured()
         ? await insertSmsLog({
               customer_id: input.customer_id ?? null,
+              dealer_id: dealer.id,
               to_phone: toPhone,
               from_phone: getDefaultFromPhone(),
               message: renderedMessage,

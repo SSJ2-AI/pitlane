@@ -9,6 +9,7 @@ import { Customer } from '../types'
 import { upsertCallLog, isSupabaseConfigured } from '../lib/supabase'
 import { processPostCall, normaliseStatus } from '../lib/postCallProcessor'
 import type { TranscriptTurn } from '../lib/summarizer'
+import { getDealerByPhone, type Dealer } from '../lib/dealer'
 
 const router = Router()
 
@@ -136,7 +137,7 @@ function formatOpenRecall(customer: Customer): string {
   return `${recall.component}: ${recall.remedy}`
 }
 
-function buildKnownCallerVariables(customer: Customer): Record<string, string> {
+function buildKnownCallerVariables(customer: Customer, dealer: Dealer): Record<string, string> {
   return {
     customer_name: `${customer.firstName} ${customer.lastName}`.trim(),
     first_name: customer.firstName,
@@ -150,13 +151,14 @@ function buildKnownCallerVariables(customer: Customer): Record<string, string> {
     advisor_notes: customer.notes ?? '',
     last_visit: customer.lastVisit ?? '',
     preferred_language: customer.preferredLanguage || 'en',
-    dealership_name: config.dealershipName,
-    dealership_branch: config.dealershipBranch,
+    dealership_name: dealer.name,
+    dealership_branch: dealer.location,
+    dealership_brand: dealer.brand,
     is_known_caller: 'true',
   }
 }
 
-function buildUnknownCallerVariables(phone: string): Record<string, string> {
+function buildUnknownCallerVariables(phone: string, dealer: Dealer): Record<string, string> {
   return {
     customer_name: 'valued customer',
     first_name: '',
@@ -170,8 +172,9 @@ function buildUnknownCallerVariables(phone: string): Record<string, string> {
     advisor_notes: '',
     last_visit: '',
     preferred_language: 'en',
-    dealership_name: config.dealershipName,
-    dealership_branch: config.dealershipBranch,
+    dealership_name: dealer.name,
+    dealership_branch: dealer.location,
+    dealership_brand: dealer.brand,
     is_known_caller: 'false',
     caller_phone: phone,
   }
@@ -187,8 +190,18 @@ router.post('/pre-call', async (req: RawBodyRequest, res: Response): Promise<Res
   const body = (req.body ?? {}) as PreCallRequestBody
   const phone = (body.caller_id ?? '').trim()
   const callSid = body.call_sid ?? `precall_${Date.now()}`
+  const calledNumber = body.called_number ?? null
 
-  console.log(`[Webhook] pre-call from=${phone || 'unknown'} call_sid=${callSid} agent=${body.agent_id ?? 'n/a'}`)
+  // Multi-tenancy: resolve which dealer this call belongs to from the Twilio
+  // number Aria was dialed on. Falls back to DEFAULT_DEALER (matching the
+  // legacy Porsche Toronto deploy) when called_number isn't given or no
+  // matching row exists.
+  const dealer = await getDealerByPhone(calledNumber)
+
+  console.log(
+    `[Webhook] pre-call from=${phone || 'unknown'} called=${calledNumber ?? 'n/a'} ` +
+    `dealer=${dealer.name} call_sid=${callSid} agent=${body.agent_id ?? 'n/a'}`,
+  )
 
   // The pre-call webhook spec says we have to respond quickly so ElevenLabs
   // can start the audio session. If anything in the lookup/screenpop chain
@@ -227,6 +240,7 @@ router.post('/pre-call', async (req: RawBodyRequest, res: Response): Promise<Res
       call_sid: callSid,
       caller_phone: phone || 'unknown',
       customer_id: customer?.id ?? null,
+      dealer_id: dealer.id,
       direction: 'inbound',
       status: 'in_progress',
       started_at: new Date().toISOString(),
@@ -236,8 +250,8 @@ router.post('/pre-call', async (req: RawBodyRequest, res: Response): Promise<Res
   const response: ConversationInitiationResponse = {
     type: 'conversation_initiation_client_data',
     dynamic_variables: customer
-      ? buildKnownCallerVariables(customer)
-      : buildUnknownCallerVariables(phone),
+      ? buildKnownCallerVariables(customer, dealer)
+      : buildUnknownCallerVariables(phone, dealer),
   }
   return res.json(response)
 })
@@ -274,6 +288,7 @@ interface PostCallRequestBody {
   call_id?: string
   call_sid?: string
   caller_phone?: string
+  called_number?: string
   duration_secs?: number
   duration_seconds?: number
   transcript?: PostCallTranscriptTurn[]
@@ -310,9 +325,16 @@ router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Re
   const status = normaliseStatus(body.status)
   const transcript = normaliseTranscript(body.transcript)
 
+  // Resolve the dealer the same way the pre-call webhook did so the post-call
+  // upsert into call_logs preserves the correct dealer_id. When ElevenLabs
+  // doesn't include called_number on post-call payloads, the pre-call row's
+  // dealer_id will already be set; processPostCall passes dealer.id which we
+  // resolve via DEFAULT_DEALER fallback.
+  const dealer = await getDealerByPhone(body.called_number)
+
   console.log(
     `[Webhook] post-call conv=${conversationId ?? 'n/a'} sid=${callSid ?? 'n/a'} ` +
-    `phone=${callerPhone || 'unknown'} dur=${duration}s status=${status} turns=${transcript.length}`,
+    `phone=${callerPhone || 'unknown'} dealer=${dealer.name} dur=${duration}s status=${status} turns=${transcript.length}`,
   )
 
   const result = await processPostCall({
@@ -322,6 +344,7 @@ router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Re
     durationSeconds: duration,
     transcript,
     status,
+    dealer,
   })
 
   return res.json({
