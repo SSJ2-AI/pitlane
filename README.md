@@ -46,6 +46,14 @@ The repo has two deployable units:
                                    └─────────────────────────┘
 ```
 
+## Dashboard surface
+
+| Route | Purpose |
+|---|---|
+| `/dashboard` | Service-advisor view per customer: profile, vehicles, recalls, service history, **warranty badge**, **upsells offered for this customer**, Aria call activity (filtered + all), outbound call dropdown, screen-pop with live caller. |
+| `/calls` | Aria call log: list + filters (customer / outcome / date range), detail drawer with transcript, AI summary, appointments booked, upsells flagged, loaner requests. Deep-linkable via `?customer_id=…`. |
+| `/service-desk` | Live operations queue: today's arrivals, loaner queue with Approve/Decline, upsell pipeline with Accepted/Declined. 15 s auto-refresh. |
+
 ## Aria tools (mid-call webhooks)
 
 | Tool | Method + path | Purpose |
@@ -102,10 +110,10 @@ All tools accept `call_id` (the ElevenLabs conversation id) so the resulting Sup
 | 2A | `POST /webhook/post-call`: GPT-4o-mini summary (outcome, topics, upsells, action items, sentiment, loaner_needed) + Supabase persistence + loaner queue auto-insert. | ✅ this PR |
 | 2C | Supabase migration: `call_logs`, `appointments`, `upsells`, `loaner_requests`, `cdk_sync_queue`. | ✅ this PR |
 | 2B | 5 new Aria tools (`book-appointment`, `log-upsell`, `request-loaner`, `repair-eta`, `warranty`) wired to Supabase + CDK sync queue. | ✅ this PR |
-| 4A | `/calls` page: list + filters (customer / outcome / date range), call detail drawer with transcript, AI summary, appointments booked, upsells flagged, loaner requests. | ✅ this PR |
-| 4B | `/service-desk` page: today's arrivals, loaner queue, in-shop ETA, upsell pipeline. | ⏭ next |
-| 4C | Vehicle-detail enhancements: warranty badge, recall warnings, per-vehicle Aria call history, upsells offered. | ⏭ |
-| 3 (new) | Full CDK write-back via Fortellis: `appointments` + notes + RO updates pushed through `cdk_sync_queue` worker. | ⏭ |
+| 4A | `/calls` page: list + filters (customer / outcome / date range), call detail drawer with transcript, AI summary, appointments booked, upsells flagged, loaner requests. Honors `?customer_id=…` deep links from the dashboard. | ✅ |
+| 4B | `/service-desk` page: today's arrivals, loaner queue with Approve/Decline actions, upsell pipeline with Accepted/Declined actions, live 15 s auto-refresh. | ✅ this PR |
+| 4C | Customer-profile enhancements: `WarrantyBadge` (live from `/tools/warranty`) with status + factory/CPO expiry + recall list; `CustomerUpsellsPanel` reading from Supabase; "Open full call log" deep link. | ✅ this PR |
+| 3 (new) | Full CDK write-back via Fortellis: `appointments` + notes + RO updates pushed through `cdk_sync_queue` worker. | ⏭ next |
 
 ## Development
 
