@@ -81,10 +81,15 @@ The repo has two deployable units:
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Foundation: voice event store, dashboard auto-load, call history, outbound button, status dot | ✅ on `main` |
-| 2 | Polished call history panel: customer, time, duration in seconds, direction, summary | ✅ |
-| 3 | "Call Customer" dropdown with 4 call types (appointment reminder, recall, follow-up, parts ready) calling the voice service directly with `customer_id` + `call_type` | ✅ |
-| 4 | Real CDK data via `src/lib/fortellis.ts` (OAuth client_credentials + Subscription-Id) in `/api/voice/customer-lookup`. Falls back to mock data when env vars are absent. | ✅ scaffold; needs real credentials to go live |
-| Next | Loaner workflow, email + ICS calendar invites, advisor "directive to Aria" mid-call context injection, write-back of appointments/notes from Aria to CDK | ⏭ |
+| 2 (legacy) | Polished call history panel: customer, time, duration in seconds, direction, summary | ✅ |
+| 3 (legacy) | "Call Customer" dropdown with 4 call types (appointment reminder, recall, follow-up, parts ready) | ✅ |
+| 4 (legacy) | Real CDK data via `src/lib/fortellis.ts` in `/api/voice/customer-lookup`. Falls back to mock when env vars are absent. | ✅ scaffold; needs creds to go live |
+| Pre-call | `POST /webhook/pre-call`: ElevenLabs `conversation_initiation_client_data` with 16 dynamic variables; auto-loads dashboard during ring; optional HMAC. | ✅ on `main` |
+| 2A | `POST /webhook/post-call`: GPT-4o-mini summary (outcome, topics, upsells, action items, sentiment, loaner_needed) + Supabase persistence + loaner queue auto-insert. | ✅ this PR |
+| 2C | Supabase migration: `call_logs`, `appointments`, `upsells`, `loaner_requests`, `cdk_sync_queue`. | ✅ this PR |
+| 2B | 5 new Aria tools (`book-appointment`, `log-upsell`, `request-loaner`, `repair-eta`, `warranty`) wired to Supabase. | ⏭ next |
+| 4 (new) | `/calls` page (call log + AI summaries + transcript), `/service-desk` page (today's arrivals, loaner queue, in-shop ETA, upsell pipeline), vehicle-detail enhancements. | ⏭ |
+| 3 (new) | Full CDK write-back via Fortellis: `appointments` + notes + RO updates pushed through `cdk_sync_queue` worker. | ⏭ |
 
 ## Development
 
@@ -135,15 +140,55 @@ PORT=3001
 ELEVENLABS_API_KEY=<>
 ELEVENLABS_AGENT_ID=<>
 ELEVENLABS_PHONE_NUMBER_ID=<>
-# Pre-call webhook HMAC secret. When set, /webhook/pre-call requires a valid
-# ElevenLabs-Signature header. Leave unset for local dev / demo.
+# Pre-call + post-call webhook HMAC secret. When set, /webhook/* requires a
+# valid ElevenLabs-Signature header. Leave unset for local dev / demo.
 ELEVENLABS_WEBHOOK_SECRET=<shared with ElevenLabs agent>
 PITLANE_API_URL=https://pitlane.vercel.app
 PITLANE_VOICE_API_KEY=<shared secret with dashboard>
 DEALERSHIP_NAME=Porsche Toronto
 DEALERSHIP_BRANCH=Don Mills Road
 USE_MOCK_DATA=true               # set false once CDK is wired (Phase 4)
+
+# ─── Phase 2A: Post-call intelligence ─────────────────────────────────
+# When OPENAI_API_KEY is set, /webhook/post-call uses GPT-4o-mini to
+# turn the transcript into structured JSON (outcome, topics,
+# upsells_flagged, action_items, sentiment, loaner_needed, summary_text).
+# Unset = deterministic heuristic fallback. Either way the summary is
+# persisted to Supabase if configured.
+OPENAI_API_KEY=<>
+
+# ─── Phase 2C: Supabase persistence ───────────────────────────────────
+# When BOTH SUPABASE_URL and a key are set, call_logs / appointments /
+# upsells / loaner_requests / cdk_sync_queue rows are written to
+# Supabase. Unset = in-memory only (demo mode).
+SUPABASE_URL=<https://<project>.supabase.co>
+SUPABASE_SERVICE_ROLE_KEY=<service-role key from Supabase dashboard>
+# SUPABASE_ANON_KEY=<>   # alternative when service-role isn't available
 ```
+
+### Applying the Supabase migration
+
+The schema for the Aria intelligence layer lives at
+`supabase/migrations/0001_aria_intelligence_layer.sql`. Apply it once per
+environment:
+
+- **Supabase CLI**:
+  ```bash
+  supabase link --project-ref <project-ref>
+  supabase db push
+  ```
+- **Supabase Dashboard**: open the SQL editor, paste the migration file,
+  click Run.
+
+Tables created:
+
+| Table | Purpose |
+|---|---|
+| `call_logs` | One row per Aria call. `in_progress` from pre-call webhook → `completed` once post-call summary lands. Holds transcript + structured summary JSON. |
+| `appointments` | Created by Aria's `book-appointment` tool. `cdk_id` filled in by the async sync worker. |
+| `upsells` | Service upsells Aria surfaces during a call (`status: pending / accepted / declined`). |
+| `loaner_requests` | Service-desk loaner queue. Auto-populated when post-call summary has `loaner_needed: true`. |
+| `cdk_sync_queue` | Outbound CDK write queue drained by the Phase 3 background worker. |
 
 ### Configuring the ElevenLabs pre-call webhook
 

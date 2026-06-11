@@ -6,6 +6,9 @@ import { checkOverride } from '../mock/sessionOverrides'
 import { broadcastScreenPop } from '../ws/screenPop'
 import { startInboundCall } from '../store/callStore'
 import { Customer } from '../types'
+import { upsertCallLog, isSupabaseConfigured } from '../lib/supabase'
+import { processPostCall, normaliseStatus } from '../lib/postCallProcessor'
+import type { TranscriptTurn } from '../lib/summarizer'
 
 const router = Router()
 
@@ -214,6 +217,22 @@ router.post('/pre-call', async (req: RawBodyRequest, res: Response): Promise<Res
     console.error('[Webhook] screen-pop / store failed (non-fatal):', err instanceof Error ? err.message : err)
   }
 
+  // Persist an in_progress call_logs row when Supabase is configured. The
+  // post-call webhook will upsert by call_sid to close it out later.
+  // We don't block the response on this — Supabase round-trip is fired and
+  // forgotten because ElevenLabs wants the conversation_initiation_client_data
+  // back as fast as possible.
+  if (isSupabaseConfigured()) {
+    void upsertCallLog({
+      call_sid: callSid,
+      caller_phone: phone || 'unknown',
+      customer_id: customer?.id ?? null,
+      direction: 'inbound',
+      status: 'in_progress',
+      started_at: new Date().toISOString(),
+    }).catch(() => undefined)
+  }
+
   const response: ConversationInitiationResponse = {
     type: 'conversation_initiation_client_data',
     dynamic_variables: customer
@@ -221,6 +240,98 @@ router.post('/pre-call', async (req: RawBodyRequest, res: Response): Promise<Res
       : buildUnknownCallerVariables(phone),
   }
   return res.json(response)
+})
+
+// ─── Post-call webhook handler ───────────────────────────────────────────────
+//
+// ElevenLabs hits this URL after the call ends with the full transcript,
+// duration, and outcome status. We:
+//   1. Re-look the customer up by caller_phone (the in-memory call store may
+//      have been wiped by a redeploy between pre-call and post-call).
+//   2. Pass the transcript through summariseTranscript() — GPT-4o-mini when
+//      OPENAI_API_KEY is set, deterministic heuristic otherwise — to get
+//      structured JSON: outcome / topics / upsells_flagged / action_items /
+//      sentiment / loaner_needed / summary_text.
+//   3. Upsert the call_logs row in Supabase (idempotent by call_sid or
+//      conversation_id), filling in transcript + summary + duration + status.
+//   4. If summary.loaner_needed is true, insert a loaner_requests row so the
+//      service desk's loaner queue picks it up.
+//   5. Close the in-memory call store record + broadcast CALL_ENDED so the
+//      dashboard's IncomingCallPopup is dismissed and CallHistory refreshes.
+//
+// Returns the parsed summary + persisted call_log_id so callers can chain
+// further actions; ElevenLabs itself ignores the body.
+
+interface PostCallTranscriptTurn {
+  role?: string
+  message?: string
+  text?: string
+  timestamp?: number
+}
+
+interface PostCallRequestBody {
+  conversation_id?: string
+  call_id?: string
+  call_sid?: string
+  caller_phone?: string
+  duration_secs?: number
+  duration_seconds?: number
+  transcript?: PostCallTranscriptTurn[]
+  status?: string
+  summary?: string
+}
+
+function normaliseTranscript(input: PostCallTranscriptTurn[] | undefined): TranscriptTurn[] {
+  if (!Array.isArray(input)) return []
+  return input
+    .map((turn) => ({
+      role: (turn.role ?? 'user') as TranscriptTurn['role'],
+      message: typeof turn.message === 'string'
+        ? turn.message
+        : typeof turn.text === 'string'
+        ? turn.text
+        : '',
+    }))
+    .filter((turn) => turn.message.length > 0)
+}
+
+router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Response> => {
+  const verification = verifyElevenLabsSignature(req)
+  if (!verification.ok) {
+    console.warn(`[Webhook] post-call rejected: ${verification.reason}`)
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
+
+  const body = (req.body ?? {}) as PostCallRequestBody
+  const conversationId = body.conversation_id ?? body.call_id ?? null
+  const callSid = body.call_sid ?? null
+  const callerPhone = (body.caller_phone ?? '').trim()
+  const duration = body.duration_secs ?? body.duration_seconds ?? 0
+  const status = normaliseStatus(body.status)
+  const transcript = normaliseTranscript(body.transcript)
+
+  console.log(
+    `[Webhook] post-call conv=${conversationId ?? 'n/a'} sid=${callSid ?? 'n/a'} ` +
+    `phone=${callerPhone || 'unknown'} dur=${duration}s status=${status} turns=${transcript.length}`,
+  )
+
+  const result = await processPostCall({
+    callSid,
+    conversationId,
+    callerPhone,
+    durationSeconds: duration,
+    transcript,
+    status,
+  })
+
+  return res.json({
+    received: true,
+    call_log_id: result.callLogId,
+    customer_id: result.customer?.id ?? null,
+    loaner_request_id: result.loanerRequestId,
+    summary: result.summary,
+    persistence: result.persistence,
+  })
 })
 
 export default router

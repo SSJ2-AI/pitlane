@@ -1,75 +1,79 @@
 import { Router, Request, Response } from 'express'
-import { broadcastScreenPop } from '../ws/screenPop'
 import { callLog } from './calls'
 import { ElevenLabsCallEvent } from '../types'
-import { endCall, startInboundCall, getCall, recordEvent } from '../store/callStore'
+import { startInboundCall, getCall, recordEvent } from '../store/callStore'
 import { lookupByPhone } from '../mock/customers'
+import { processPostCall, normaliseStatus } from '../lib/postCallProcessor'
+import type { TranscriptTurn } from '../lib/summarizer'
 
 const router = Router()
 
 /**
  * POST /events/call-completed
- * ElevenLabs sends this after every call ends.
- * Contains transcript, summary, duration, and outcome.
+ *
+ * Legacy ElevenLabs post-call endpoint. Kept for back-compat with agents that
+ * still point at the old URL. Delegates to the shared post-call pipeline so
+ * the resulting record gets the GPT-4o-mini summary + Supabase persistence
+ * just like POST /webhook/post-call (the canonical endpoint).
  */
-router.post('/call-completed', (req: Request, res: Response) => {
-  const event = req.body as ElevenLabsCallEvent
+router.post('/call-completed', (req: Request, res: Response): void => {
+  (async () => {
+    const event = req.body as ElevenLabsCallEvent
+    console.log(`[Events] (legacy) call-completed call_id=${event.call_id} dur=${event.duration_seconds}s status=${event.status}`)
 
-  console.log(`[Events] Call completed: call_id=${event.call_id} duration=${event.duration_seconds}s status=${event.status}`)
-
-  const normalizedStatus =
-    event.status === 'completed' ? 'completed' : event.status === 'no_answer' ? 'no_answer' : 'failed'
-
-  const logEntry = callLog.find(c => c.id === event.call_id)
-  if (logEntry) {
-    logEntry.status = normalizedStatus
-    logEntry.duration = event.duration_seconds
-    logEntry.summary = event.summary
-  } else {
-    callLog.unshift({
-      id: event.call_id,
-      direction: 'inbound',
-      phone: event.caller_phone ?? 'unknown',
-      status: normalizedStatus === 'no_answer' ? 'no_answer' : normalizedStatus === 'completed' ? 'completed' : 'failed',
-      duration: event.duration_seconds,
-      summary: event.summary,
-      timestamp: new Date(event.start_time_unix * 1000).toISOString(),
-    })
-  }
-
-  // Make sure the call exists in the persistent store before ending it.
-  // This handles inbound calls where Aria never invoked customer-lookup
-  // (so startInboundCall was never called during the call).
-  if (!getCall(event.call_id)) {
+    const status = normaliseStatus(event.status)
     const phone = event.caller_phone ?? 'unknown'
-    startInboundCall({
-      callId: event.call_id,
-      phone,
-      customer: phone !== 'unknown' ? lookupByPhone(phone) : null,
-    })
-  }
-  endCall({
-    callId: event.call_id,
-    status: normalizedStatus,
-    durationSeconds: event.duration_seconds,
-    summary: event.summary,
-    transcript: event.transcript ? event.transcript.map(t => `[${t.role}] ${t.message}`).join('\n') : undefined,
-  })
 
-  // Broadcast call ended event to PitLane dashboard
-  broadcastScreenPop({
-    type: 'CALL_ENDED',
-    callId: event.call_id,
-    duration: event.duration_seconds,
-    summary: event.summary ?? 'Call completed.',
-    transcript: event.transcript
-      ? event.transcript.map(t => `[${t.role}] ${t.message}`).join('\n')
-      : undefined,
-    timestamp: new Date().toISOString(),
-  })
+    // Keep the in-memory callLog list (used by GET /calls/history fallback)
+    // up to date — the new pipeline only manages the callStore + Supabase.
+    const logEntry = callLog.find(c => c.id === event.call_id)
+    if (logEntry) {
+      logEntry.status = status
+      logEntry.duration = event.duration_seconds
+      logEntry.summary = event.summary
+    } else {
+      callLog.unshift({
+        id: event.call_id,
+        direction: 'inbound',
+        phone,
+        status,
+        duration: event.duration_seconds,
+        summary: event.summary,
+        timestamp: new Date(event.start_time_unix * 1000).toISOString(),
+      })
+    }
 
-  // Always return 200 so ElevenLabs doesn't retry
-  return res.sendStatus(200)
+    // Make sure the call exists in the in-memory store so processPostCall's
+    // CALL_ENDED broadcast finds something to close.
+    if (!getCall(event.call_id)) {
+      startInboundCall({
+        callId: event.call_id,
+        phone,
+        customer: phone !== 'unknown' ? lookupByPhone(phone) : null,
+      })
+    }
+
+    const transcript: TranscriptTurn[] = event.transcript
+      ? event.transcript.map((t) => ({ role: t.role, message: t.message }))
+      : []
+
+    try {
+      await processPostCall({
+        conversationId: event.call_id,
+        callerPhone: phone === 'unknown' ? '' : phone,
+        durationSeconds: event.duration_seconds,
+        transcript,
+        status,
+      })
+    } catch (err) {
+      console.error('[Events] (legacy) processPostCall failed:', err instanceof Error ? err.message : err)
+    }
+
+    res.sendStatus(200)
+  })().catch((err: Error) => {
+    console.error('[Events] (legacy) unhandled error:', err.message)
+    res.sendStatus(200) // still 200 so ElevenLabs doesn't retry
+  })
 })
 
 /**
