@@ -90,6 +90,7 @@ export interface CallLogRow {
     id: string;
     caller_phone: string;
     customer_id: string | null;
+    dealer_id: string | null;
     call_sid: string | null;
     conversation_id: string | null;
     direction: 'inbound' | 'outbound';
@@ -105,6 +106,7 @@ export interface CallLogRow {
 export interface AppointmentRow {
     id: string;
     customer_id: string;
+    dealer_id: string | null;
     vehicle_id: string;
     date: string;
     time: string;
@@ -122,6 +124,7 @@ export interface UpsellRow {
     id: string;
     call_log_id: string | null;
     customer_id: string;
+    dealer_id: string | null;
     vehicle_id: string;
     upsell_type: string;
     description: string | null;
@@ -135,6 +138,7 @@ export interface LoanerRequestRow {
     call_log_id: string | null;
     appointment_id: string | null;
     customer_id: string;
+    dealer_id: string | null;
     requested_date: string | null;
     loaner_preferred: string | null;
     status: string;

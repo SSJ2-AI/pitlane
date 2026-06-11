@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getSupabase } from '@/lib/supabase';
+import { resolveDealerForRequest } from '@/lib/dealer';
 
 // PATCH /api/upsells/:id
 //   body: { status: 'accepted' | 'declined' | 'expired' | 'pending' }
@@ -32,10 +33,13 @@ export async function PATCH(request: Request, context: RouteContext) {
         return NextResponse.json({ error: `status must be one of ${Array.from(ALLOWED).join(', ')}` }, { status: 400 });
     }
 
+    const dealer = await resolveDealerForRequest(request);
+
     const { data, error } = await supabase
         .from('upsells')
         .update({ status: body.status })
         .eq('id', id)
+        .eq('dealer_id', dealer.id)
         .select('*')
         .single();
 

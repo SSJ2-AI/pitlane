@@ -46,6 +46,44 @@ The repo has two deployable units:
                                    └─────────────────────────┘
 ```
 
+## Multi-tenancy
+
+Every operational table (`call_logs`, `appointments`, `upsells`,
+`loaner_requests`, `sms_log`, `sms_consent`, `cdk_sync_queue`) carries a
+`dealer_id` FK to the new `dealers` table. The intended deploy model is
+**one Railway deploy per service + one Supabase project, hosting many
+dealerships**. Twilio number → dealer routing happens in the voice
+service; subdomain → dealer routing happens on the dashboard.
+
+| Where | Resolution strategy |
+|---|---|
+| Voice — pre/post-call webhook | `getDealerByPhone(called_number)` → `dealers.phone_number`. Falls back to `DEFAULT_DEALER` (Porsche Toronto) when no row matches. |
+| Voice — Aria tools | `resolveDealerForCall(conversation_id)` → reads `call_logs.dealer_id` set by pre-call. |
+| Dashboard — every `/api/*` route | `resolveDealerForRequest(request)` → `?dealer_id=` query → `x-dealer-id` header → subdomain (`porsche-toronto.pitlane.ai` → `dealers.subdomain`) → DEFAULT. |
+
+### Adding a new dealer
+
+1. Provision a Twilio number.
+2. Insert a `dealers` row with `phone_number`, `subdomain`, `brand`,
+   `elevenlabs_agent_id` (reuse the brand-level agent), and CDK creds.
+3. Point Twilio's voice webhook at the existing
+   `https://<voice>/webhook/pre-call` + `https://<voice>/webhook/post-call`.
+4. (Optional) Add the subdomain to your DNS / hosting so the dashboard
+   resolves it.
+
+Zero code changes. The shared agent uses dynamic variables for per-dealer
+branding (`{{dealership_name}}`, `{{dealership_branch}}`,
+`{{dealership_brand}}`).
+
+### RLS (defense-in-depth)
+
+Migration 0003 enables Row-Level Security on every tenanted table with a
+`dealer_isolation_*` policy that filters by `current_setting('app.current_dealer_id')`.
+The voice service and dashboard API routes use the Supabase service-role
+key which *bypasses RLS*, so today's writes/reads aren't constrained by
+the policy — the policy is the safety net for any future caller that
+uses an anon or per-user JWT key.
+
 ## Phase 5 — SMS layer
 
 PitLane sends transactional SMS through Twilio via two endpoints, both backed
