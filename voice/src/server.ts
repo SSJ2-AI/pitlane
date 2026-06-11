@@ -7,6 +7,7 @@ import { initWebSocketServer } from './ws/screenPop'
 import toolsRouter from './routes/tools'
 import callsRouter from './routes/calls'
 import eventsRouter from './routes/events'
+import webhookRouter from './routes/webhook'
 import { setGlobalNextCaller, setPhoneOverride, listOverrides } from './mock/sessionOverrides'
 import { MOCK_CUSTOMERS } from './mock/customers'
 
@@ -18,7 +19,15 @@ app.use(cors({
   origin: [config.pitlaneDashboardUrl, 'http://localhost:3000', 'http://localhost:3001'],
   credentials: true,
 }))
-app.use(express.json())
+// Capture the raw body so the ElevenLabs pre-call webhook handler can verify
+// the HMAC signature. The parsed `req.body` is still available afterwards.
+app.use(express.json({
+  verify: (req, _res, buf) => {
+    if (buf && buf.length) {
+      (req as express.Request & { rawBody?: Buffer }).rawBody = Buffer.from(buf)
+    }
+  },
+}))
 app.use(express.urlencoded({ extended: true }))
 
 // Request logger
@@ -45,6 +54,11 @@ app.get('/health', (_req, res) => {
     mode: config.useMockData ? 'mock' : 'live',
   })
 })
+
+// ElevenLabs pre-call webhook — fires during Twilio ring/dial, lets us inject
+// dynamic variables (customer name, vehicle, etc.) before the audio session
+// starts so Aria opens the conversation with full context.
+app.use('/webhook', webhookRouter)
 
 // ElevenLabs server tool webhooks — agent calls these mid-call
 app.use('/tools', toolsRouter)
@@ -151,6 +165,7 @@ httpServer.listen(config.port, () => {
 ║  Mode:      ${config.useMockData ? 'MOCK (no real CDK needed)        ' : 'LIVE                           '}  ║
 ╠══════════════════════════════════════════════════════╣
 ║  Routes:                                             ║
+║    POST /webhook/pre-call    (ElevenLabs init)       ║
 ║    POST /tools/customer-lookup                       ║
 ║    POST /tools/book-appointment                      ║
 ║    POST /tools/check-ro-status                       ║
