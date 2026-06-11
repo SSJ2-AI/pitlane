@@ -46,6 +46,20 @@ The repo has two deployable units:
                                    └─────────────────────────┘
 ```
 
+## Aria tools (mid-call webhooks)
+
+| Tool | Method + path | Purpose |
+|---|---|---|
+| `customer_lookup` | `GET POST /tools/customer-lookup` | Legacy mid-call ID fallback; superseded by `/webhook/pre-call` for new agents. |
+| `book_appointment` | `POST GET /tools/book-appointment` | Books an appointment, writes to `appointments`, queues a `cdk_sync_queue` row. Returns `{confirmed, confirmation_number, advisor, duration_est_hours}`. |
+| `log_upsell` | `POST GET /tools/log-upsell` | Records an upsell against the customer + call, returns `{logged, upsell_id}`. |
+| `request_loaner` | `POST GET /tools/request-loaner` | Adds a pending loaner request the service desk approves, returns `{requested, status, loaner_id}`. |
+| `repair_eta` | `GET /tools/repair-eta/:ro_id` | Status + ETA for an existing repair order. Mock-derived today, Fortellis RO Async in Phase 3. |
+| `warranty` | `GET /tools/warranty/:vehicle_id` | Factory + CPO expiry, open recalls. Mock-derived today, Fortellis Vehicle API in Phase 3. |
+| `check_ro_status` | `POST GET /tools/check-ro-status` | Legacy lookup of open RO by customer or RO number (`repair_eta` is the preferred replacement). |
+
+All tools accept `call_id` (the ElevenLabs conversation id) so the resulting Supabase row is FK-linked back to the right `call_logs.id`. The pre-call webhook will have already opened the `call_logs` row; the tools resolve the conversation_id via `getOrCreateCallLogIdForConversation`.
+
 ## Phase 1 — what's wired today
 
 - **Aria identifies the caller during the ring**, before audio connects, via
@@ -87,8 +101,10 @@ The repo has two deployable units:
 | Pre-call | `POST /webhook/pre-call`: ElevenLabs `conversation_initiation_client_data` with 16 dynamic variables; auto-loads dashboard during ring; optional HMAC. | ✅ on `main` |
 | 2A | `POST /webhook/post-call`: GPT-4o-mini summary (outcome, topics, upsells, action items, sentiment, loaner_needed) + Supabase persistence + loaner queue auto-insert. | ✅ this PR |
 | 2C | Supabase migration: `call_logs`, `appointments`, `upsells`, `loaner_requests`, `cdk_sync_queue`. | ✅ this PR |
-| 2B | 5 new Aria tools (`book-appointment`, `log-upsell`, `request-loaner`, `repair-eta`, `warranty`) wired to Supabase. | ⏭ next |
-| 4 (new) | `/calls` page (call log + AI summaries + transcript), `/service-desk` page (today's arrivals, loaner queue, in-shop ETA, upsell pipeline), vehicle-detail enhancements. | ⏭ |
+| 2B | 5 new Aria tools (`book-appointment`, `log-upsell`, `request-loaner`, `repair-eta`, `warranty`) wired to Supabase + CDK sync queue. | ✅ this PR |
+| 4A | `/calls` page: list + filters (customer / outcome / date range), call detail drawer with transcript, AI summary, appointments booked, upsells flagged, loaner requests. | ✅ this PR |
+| 4B | `/service-desk` page: today's arrivals, loaner queue, in-shop ETA, upsell pipeline. | ⏭ next |
+| 4C | Vehicle-detail enhancements: warranty badge, recall warnings, per-vehicle Aria call history, upsells offered. | ⏭ |
 | 3 (new) | Full CDK write-back via Fortellis: `appointments` + notes + RO updates pushed through `cdk_sync_queue` worker. | ⏭ |
 
 ## Development
