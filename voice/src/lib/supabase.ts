@@ -131,3 +131,150 @@ export async function insertLoanerRequest(row: LoanerRequestInsert): Promise<str
     return null
   }
 }
+
+// ─── Appointment + upsell + sync queue helpers (Phase 2B) ─────────────────────
+
+export interface AppointmentInsert {
+  call_log_id?: string | null
+  customer_id: string
+  vehicle_id: string
+  date: string                       // YYYY-MM-DD
+  time: string                       // HH:MM(:SS)
+  service_type: string
+  advisor?: string | null
+  duration_est_hours?: number | null
+  confirmation_number: string
+  status?: 'confirmed' | 'scheduled' | 'cancelled' | 'completed'
+}
+
+export async function insertAppointment(row: AppointmentInsert): Promise<string | null> {
+  const client = getSupabase()
+  if (!client) return null
+  try {
+    const { data, error } = await client.from('appointments').insert(row).select('id').single()
+    if (error) throw error
+    return (data as { id: string } | null)?.id ?? null
+  } catch (err) {
+    console.error('[Supabase] insertAppointment failed:', err instanceof Error ? err.message : err)
+    return null
+  }
+}
+
+export interface UpsellInsert {
+  call_log_id?: string | null
+  customer_id: string
+  vehicle_id: string
+  upsell_type: string
+  description?: string | null
+  value_est?: number | null
+  status?: 'pending' | 'accepted' | 'declined' | 'expired'
+}
+
+export async function insertUpsell(row: UpsellInsert): Promise<string | null> {
+  const client = getSupabase()
+  if (!client) return null
+  try {
+    const { data, error } = await client.from('upsells').insert(row).select('id').single()
+    if (error) throw error
+    return (data as { id: string } | null)?.id ?? null
+  } catch (err) {
+    console.error('[Supabase] insertUpsell failed:', err instanceof Error ? err.message : err)
+    return null
+  }
+}
+
+export interface CdkSyncEnqueue {
+  entity_type: 'appointment' | 'upsell' | 'loaner_request' | 'note'
+  entity_id: string
+  payload: Record<string, unknown>
+}
+
+/** Queue an outbound CDK write. The Phase 3 worker drains this. */
+export async function queueCdkSync(row: CdkSyncEnqueue): Promise<string | null> {
+  const client = getSupabase()
+  if (!client) return null
+  try {
+    const { data, error } = await client.from('cdk_sync_queue').insert(row).select('id').single()
+    if (error) throw error
+    return (data as { id: string } | null)?.id ?? null
+  } catch (err) {
+    console.error('[Supabase] queueCdkSync failed:', err instanceof Error ? err.message : err)
+    return null
+  }
+}
+
+// ─── Call-log resolution for Aria's mid-call tool invocations ────────────────
+//
+// During a call Aria's tools fire with the ElevenLabs conversation_id (passed
+// as call_id in our tool requests). The pre-call webhook has already opened a
+// call_logs row keyed by Twilio's call_sid, so the conversation_id field is
+// initially NULL.
+//
+// This helper does a single round-trip:
+//   1. SELECT id, customer_id FROM call_logs WHERE conversation_id = $cid
+//   2. If miss: try to attach $cid to the most recent in_progress row for
+//      this caller_phone or customer (which the pre-call webhook created).
+//   3. If still miss: INSERT a fresh in_progress row with conversation_id =
+//      $cid so the foreign key from appointments/upsells/loaner_requests has
+//      a valid target.
+//
+// Returns the call_logs.id (uuid) which is what the FK columns expect.
+
+export async function getOrCreateCallLogIdForConversation(
+  conversationId: string,
+  hints?: { customerId?: string | null; phone?: string | null },
+): Promise<string | null> {
+  const client = getSupabase()
+  if (!client) return null
+
+  try {
+    const lookup = await client
+      .from('call_logs')
+      .select('id')
+      .eq('conversation_id', conversationId)
+      .maybeSingle()
+    if (lookup.data?.id) return lookup.data.id as string
+
+    if (hints?.customerId || hints?.phone) {
+      const query = client
+        .from('call_logs')
+        .select('id, customer_id, caller_phone')
+        .eq('status', 'in_progress')
+        .is('conversation_id', null)
+        .order('started_at', { ascending: false })
+        .limit(1)
+
+      if (hints.customerId) {
+        query.eq('customer_id', hints.customerId)
+      } else if (hints.phone) {
+        query.eq('caller_phone', hints.phone)
+      }
+
+      const recent = await query.maybeSingle()
+      if (recent.data?.id) {
+        const id = recent.data.id as string
+        await client
+          .from('call_logs')
+          .update({ conversation_id: conversationId })
+          .eq('id', id)
+        return id
+      }
+    }
+
+    const inserted = await client
+      .from('call_logs')
+      .insert({
+        conversation_id: conversationId,
+        caller_phone: hints?.phone ?? 'unknown',
+        customer_id: hints?.customerId ?? null,
+        direction: 'inbound',
+        status: 'in_progress',
+      })
+      .select('id')
+      .single()
+    return (inserted.data as { id: string } | null)?.id ?? null
+  } catch (err) {
+    console.error('[Supabase] getOrCreateCallLogIdForConversation failed:', err instanceof Error ? err.message : err)
+    return null
+  }
+}

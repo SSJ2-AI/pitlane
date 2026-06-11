@@ -2,10 +2,18 @@ import { Router, Request, Response } from 'express'
 import { lookupByPhone, lookupById, lookupByPhoneWithCDK, MOCK_CUSTOMERS } from '../mock/customers'
 import { checkOverride } from '../mock/sessionOverrides'
 import { broadcastScreenPop } from '../ws/screenPop'
-import { CustomerLookupRequest, BookAppointmentRequest, CheckROStatusRequest, Appointment } from '../types'
+import { CustomerLookupRequest, BookAppointmentRequest, CheckROStatusRequest, Appointment, Vehicle, Customer } from '../types'
 import { config } from '../config'
 import { randomUUID } from 'crypto'
 import { recordEvent, startInboundCall } from '../store/callStore'
+import {
+  getOrCreateCallLogIdForConversation,
+  insertAppointment,
+  insertLoanerRequest,
+  insertUpsell,
+  isSupabaseConfigured,
+  queueCdkSync,
+} from '../lib/supabase'
 
 const router = Router()
 
@@ -141,14 +149,16 @@ router.post('/customer-lookup', (req: Request, res: Response): void => {
 
 // GET /tools/book-appointment — query param version for ElevenLabs tool path
 router.get('/book-appointment', (req: Request, res: Response) => {
-  return handleBookAppointment(
-    req.query.customer_id as string,
-    req.query.vehicle_id as string,
-    req.query.service_type as string,
-    req.query.preferred_date as string,
-    req.query.preferred_time as string | undefined,
-    (req.query.call_id as string | undefined) ?? undefined,
-    res
+  void handleBookAppointment(
+    {
+      customerId: req.query.customer_id as string,
+      vehicleId: req.query.vehicle_id as string,
+      serviceType: req.query.service_type as string,
+      date: (req.query.date as string) ?? (req.query.preferred_date as string),
+      time: (req.query.time as string) ?? (req.query.preferred_time as string | undefined),
+      callId: req.query.call_id as string | undefined,
+    },
+    res,
   )
 })
 
@@ -164,17 +174,28 @@ router.get('/check-ro-status/:customer_id', (req: Request, res: Response) => {
 
 /**
  * POST /tools/book-appointment
+ * Body: { customer_id, vehicle_id, service_type, date | preferred_date,
+ *         time | preferred_time, call_id? }
+ *
+ * Returns the Phase 2B response shape:
+ *   { confirmed, confirmation_number, advisor, duration_est_hours, message }
+ *
+ * Side effects: writes to appointments table, queues a cdk_sync_queue row
+ * (entity_type='appointment') for the Phase 3 worker, updates the in-memory
+ * Customer record and call store.
  */
 router.post('/book-appointment', (req: Request, res: Response) => {
-  const body = req.body as BookAppointmentRequest
-  return handleBookAppointment(
-    body.customer_id as string,
-    body.vehicle_id as string,
-    body.service_type as string,
-    body.preferred_date as string,
-    body.preferred_time as string | undefined,
-    body.call_id as string | undefined,
-    res
+  const body = req.body as BookAppointmentRequest & { date?: string; time?: string }
+  void handleBookAppointment(
+    {
+      customerId: body.customer_id,
+      vehicleId: body.vehicle_id,
+      serviceType: body.service_type,
+      date: body.date ?? body.preferred_date,
+      time: body.time ?? body.preferred_time,
+      callId: body.call_id,
+    },
+    res,
   )
 })
 
@@ -192,58 +213,447 @@ router.post('/check-ro-status', (req: Request, res: Response) => {
   )
 })
 
+// ─── Phase 2B: log-upsell ────────────────────────────────────────────────────
+
+interface LogUpsellBody {
+  customer_id: string
+  vehicle_id: string
+  upsell_type: string
+  description?: string
+  value_est?: number
+  call_id?: string
+}
+
+router.post('/log-upsell', (req: Request, res: Response): void => {
+  void handleLogUpsell(req.body as LogUpsellBody, res)
+})
+
+router.get('/log-upsell', (req: Request, res: Response): void => {
+  void handleLogUpsell(
+    {
+      customer_id: req.query.customer_id as string,
+      vehicle_id: req.query.vehicle_id as string,
+      upsell_type: req.query.upsell_type as string,
+      description: req.query.description as string | undefined,
+      value_est: req.query.value_est ? Number(req.query.value_est) : undefined,
+      call_id: req.query.call_id as string | undefined,
+    },
+    res,
+  )
+})
+
+// ─── Phase 2B: request-loaner ────────────────────────────────────────────────
+
+interface RequestLoanerBody {
+  customer_id: string
+  appointment_date?: string
+  loaner_preferred?: string
+  call_id?: string
+}
+
+router.post('/request-loaner', (req: Request, res: Response): void => {
+  void handleRequestLoaner(req.body as RequestLoanerBody, res)
+})
+
+router.get('/request-loaner', (req: Request, res: Response): void => {
+  void handleRequestLoaner(
+    {
+      customer_id: req.query.customer_id as string,
+      appointment_date: req.query.appointment_date as string | undefined,
+      loaner_preferred: req.query.loaner_preferred as string | undefined,
+      call_id: req.query.call_id as string | undefined,
+    },
+    res,
+  )
+})
+
+// ─── Phase 2B: repair-eta ────────────────────────────────────────────────────
+// GET /tools/repair-eta/:ro_id — Aria reads this back to a caller asking
+// "is my car ready?". Mock mode walks MOCK_CUSTOMERS for the RO; the real
+// CDK path will be added in Phase 3 via Fortellis RO Async API.
+
+router.get('/repair-eta/:ro_id', (req: Request, res: Response) => {
+  return handleRepairEta(req.params.ro_id, res)
+})
+
+router.post('/repair-eta', (req: Request, res: Response) => {
+  const body = req.body as { ro_id?: string }
+  if (!body?.ro_id) return res.status(400).json({ error: 'ro_id is required' })
+  return handleRepairEta(body.ro_id, res)
+})
+
+// ─── Phase 2B: warranty ──────────────────────────────────────────────────────
+// GET /tools/warranty/:vehicle_id — Aria uses this when the caller asks
+// about warranty coverage, factory expiry, CPO, or open recalls. Mock mode
+// derives plausible dates from the vehicle's model year; real CDK will be
+// added in Phase 3.
+
+router.get('/warranty/:vehicle_id', (req: Request, res: Response) => {
+  return handleWarranty(req.params.vehicle_id, res)
+})
+
+router.post('/warranty', (req: Request, res: Response) => {
+  const body = req.body as { vehicle_id?: string }
+  if (!body?.vehicle_id) return res.status(400).json({ error: 'vehicle_id is required' })
+  return handleWarranty(body.vehicle_id, res)
+})
+
 // ─── Shared appointment booking handler ───────────────────────────────────────
 
-function handleBookAppointment(
-  customerId: string,
-  vehicleId: string,
-  serviceType: string,
-  preferredDate: string,
-  preferredTime: string | undefined,
-  callId: string | undefined,
-  res: Response
-): Response {
-  console.log(`[Tool] book-appointment: customer=${customerId} service=${serviceType} date=${preferredDate} call=${callId ?? 'n/a'}`)
+interface BookAppointmentInput {
+  customerId: string
+  vehicleId: string
+  serviceType: string
+  date: string
+  time?: string
+  callId?: string
+}
+
+/**
+ * Service-type -> ballpark duration in hours. Used both as the
+ * duration_est_hours response field and to populate the appointments row.
+ * Picked to be reasonable defaults; advisors can override in the dashboard.
+ */
+function estimateDurationHours(serviceType: string): number {
+  const s = serviceType.toLowerCase()
+  if (s.includes('track') || s.includes('pccb')) return 4
+  if (s.includes('brake')) return 3
+  if (s.includes('annual service b') || s.includes('major')) return 3
+  if (s.includes('annual service') || s.includes('service a')) return 2
+  if (s.includes('inspection') || s.includes('software')) return 1
+  if (s.includes('recall')) return 1
+  if (s.includes('oil')) return 0.75
+  return 1.5
+}
+
+const ADVISOR_POOL = ['Michael Chen', 'Sarah Kowalski', 'Tom Reeves', 'Marco Alvarez', 'Nina Patel']
+function pickAdvisor(customer: Customer): string {
+  // Prefer the customer's most recent advisor if we can read one off an
+  // existing RO or appointment — otherwise round-robin from the pool.
+  const existing =
+    customer.openRepairOrders[0]?.advisorName ??
+    customer.upcomingAppointments[0]?.advisorName
+  if (existing) return existing
+  const idx = (customer.id.charCodeAt(customer.id.length - 1) + Date.now() / 1000) | 0
+  return ADVISOR_POOL[idx % ADVISOR_POOL.length]
+}
+
+async function handleBookAppointment(input: BookAppointmentInput, res: Response): Promise<Response> {
+  const { customerId, vehicleId, serviceType, callId } = input
+  const date = input.date
+  const time = input.time ?? '09:00'
+
+  console.log(
+    `[Tool] book-appointment customer=${customerId} vehicle=${vehicleId} ` +
+    `service=${serviceType} date=${date} time=${time} call=${callId ?? 'n/a'}`,
+  )
+
+  if (!customerId || !serviceType || !date) {
+    return res.status(400).json({
+      confirmed: false,
+      error: 'customer_id, service_type, and date are required',
+    })
+  }
+
   const customer = lookupById(customerId)
   if (!customer) {
-    return res.status(404).json({ success: false, error: 'Customer not found' })
+    return res.status(404).json({ confirmed: false, error: 'Customer not found' })
   }
+
+  const vehicle =
+    customer.vehicles.find((v: { id: string }) => v.id === vehicleId) ?? customer.vehicles[0]
+
   const confirmationNumber = `APT-${Date.now().toString(36).toUpperCase()}`
-  const vehicle = customer.vehicles.find((v: { id: string }) => v.id === vehicleId) ?? customer.vehicles[0]
-  const time = preferredTime ?? '09:00'
+  const advisor = pickAdvisor(customer)
+  const durationHours = estimateDurationHours(serviceType)
+
+  // 1. In-memory mock customer mutation so subsequent customer-lookup calls
+  //    see the new appointment.
   const newAppt: Appointment = {
     id: randomUUID(),
     customerId: customer.id,
     vehicleId: vehicle?.id ?? '',
-    date: preferredDate,
+    date,
     time,
     serviceType,
-    advisorName: 'Available Advisor',
+    advisorName: advisor,
     status: 'scheduled',
   }
   customer.upcomingAppointments.push(newAppt)
 
+  // 2. Call store event so the dashboard's live call timeline shows the
+  //    booking the moment Aria proposes it.
   if (callId) {
     recordEvent(callId, 'APPOINTMENT_REQUESTED', {
       customerId: customer.id,
       vehicleId: newAppt.vehicleId,
       serviceType,
-      date: preferredDate,
+      date,
       time,
       confirmationNumber,
+      advisor,
+      duration_est_hours: durationHours,
     })
   }
 
-  return res.json({
-    success: true,
-    confirmationNumber,
-    appointment: {
-      date: preferredDate,
+  // 3. Persist to Supabase + queue CDK sync (no-ops when not configured).
+  let supabaseAppointmentId: string | null = null
+  if (isSupabaseConfigured()) {
+    const callLogId = callId
+      ? await getOrCreateCallLogIdForConversation(callId, {
+          customerId: customer.id,
+          phone: customer.phone,
+        })
+      : null
+
+    supabaseAppointmentId = await insertAppointment({
+      call_log_id: callLogId,
+      customer_id: customer.id,
+      vehicle_id: vehicle?.id ?? '',
+      date,
       time,
-      serviceType,
-      vehicle: vehicle ? `${(vehicle as { year: number; model: string }).year} Porsche ${(vehicle as { year: number; model: string }).model}` : 'Your vehicle',
-      message: `Your appointment has been confirmed for ${preferredDate} at ${time}. Confirmation: ${confirmationNumber}.`,
-    },
+      service_type: serviceType,
+      advisor,
+      duration_est_hours: durationHours,
+      confirmation_number: confirmationNumber,
+      status: 'confirmed',
+    })
+
+    if (supabaseAppointmentId) {
+      await queueCdkSync({
+        entity_type: 'appointment',
+        entity_id: supabaseAppointmentId,
+        payload: {
+          customer_id: customer.id,
+          vehicle_id: vehicle?.id ?? '',
+          date,
+          time,
+          service_type: serviceType,
+          advisor,
+          confirmation_number: confirmationNumber,
+        },
+      })
+    }
+  }
+
+  return res.json({
+    confirmed: true,
+    confirmation_number: confirmationNumber,
+    advisor,
+    duration_est_hours: durationHours,
+    appointment_id: supabaseAppointmentId,
+    vehicle: vehicle ? `${vehicle.year} Porsche ${vehicle.model} ${vehicle.trim ?? ''}`.trim() : 'Your vehicle',
+    message:
+      `Your ${serviceType} appointment is confirmed for ${date} at ${time} with ${advisor}. ` +
+      `Estimated duration: ${durationHours} hours. Confirmation: ${confirmationNumber}.`,
+    persistence: isSupabaseConfigured() ? 'supabase' : 'in-memory',
+  })
+}
+
+// ─── Phase 2B: log-upsell handler ────────────────────────────────────────────
+
+async function handleLogUpsell(input: LogUpsellBody, res: Response): Promise<Response> {
+  console.log(
+    `[Tool] log-upsell customer=${input.customer_id} vehicle=${input.vehicle_id} ` +
+    `type=${input.upsell_type} value=${input.value_est ?? '?'} call=${input.call_id ?? 'n/a'}`,
+  )
+
+  if (!input.customer_id || !input.vehicle_id || !input.upsell_type) {
+    return res.status(400).json({
+      logged: false,
+      error: 'customer_id, vehicle_id, and upsell_type are required',
+    })
+  }
+  const customer = lookupById(input.customer_id)
+  if (!customer) return res.status(404).json({ logged: false, error: 'Customer not found' })
+
+  if (input.call_id) {
+    recordEvent(input.call_id, 'NOTE_ADDED', {
+      source: 'aria',
+      action: 'log_upsell',
+      upsell_type: input.upsell_type,
+      value_est: input.value_est ?? null,
+    })
+  }
+
+  let upsellId: string | null = null
+  if (isSupabaseConfigured()) {
+    const callLogId = input.call_id
+      ? await getOrCreateCallLogIdForConversation(input.call_id, {
+          customerId: customer.id,
+          phone: customer.phone,
+        })
+      : null
+
+    upsellId = await insertUpsell({
+      call_log_id: callLogId,
+      customer_id: customer.id,
+      vehicle_id: input.vehicle_id,
+      upsell_type: input.upsell_type,
+      description: input.description ?? null,
+      value_est: input.value_est ?? null,
+      status: 'pending',
+    })
+  }
+
+  // Stable human-readable id even when Supabase isn't configured, so the
+  // ElevenLabs agent can read it back to the customer if it wants to.
+  const displayId = upsellId ? `UP-${upsellId.slice(0, 8).toUpperCase()}` : `UP-${Date.now().toString(36).toUpperCase()}`
+
+  return res.json({
+    logged: true,
+    upsell_id: displayId,
+    supabase_id: upsellId,
+    persistence: isSupabaseConfigured() ? 'supabase' : 'in-memory',
+  })
+}
+
+// ─── Phase 2B: request-loaner handler ────────────────────────────────────────
+
+async function handleRequestLoaner(input: RequestLoanerBody, res: Response): Promise<Response> {
+  console.log(
+    `[Tool] request-loaner customer=${input.customer_id} date=${input.appointment_date ?? '?'} ` +
+    `preferred=${input.loaner_preferred ?? '?'} call=${input.call_id ?? 'n/a'}`,
+  )
+
+  if (!input.customer_id) {
+    return res.status(400).json({ requested: false, error: 'customer_id is required' })
+  }
+  const customer = lookupById(input.customer_id)
+  if (!customer) return res.status(404).json({ requested: false, error: 'Customer not found' })
+
+  if (input.call_id) {
+    recordEvent(input.call_id, 'LOANER_REQUESTED', {
+      customerId: customer.id,
+      appointmentDate: input.appointment_date ?? null,
+      preferred: input.loaner_preferred ?? null,
+    })
+  }
+
+  let loanerId: string | null = null
+  if (isSupabaseConfigured()) {
+    const callLogId = input.call_id
+      ? await getOrCreateCallLogIdForConversation(input.call_id, {
+          customerId: customer.id,
+          phone: customer.phone,
+        })
+      : null
+
+    loanerId = await insertLoanerRequest({
+      call_log_id: callLogId,
+      customer_id: customer.id,
+      requested_date:
+        input.appointment_date ?? customer.upcomingAppointments[0]?.date ?? null,
+      loaner_preferred: input.loaner_preferred ?? null,
+    })
+  }
+
+  const displayId = loanerId ? `LN-${loanerId.slice(0, 8).toUpperCase()}` : `LN-${Date.now().toString(36).toUpperCase()}`
+
+  return res.json({
+    requested: true,
+    status: 'pending_confirmation',
+    loaner_id: displayId,
+    supabase_id: loanerId,
+    message:
+      `Loaner request logged for ${customer.firstName}. ` +
+      `The service desk will confirm availability and follow up.`,
+    persistence: isSupabaseConfigured() ? 'supabase' : 'in-memory',
+  })
+}
+
+// ─── Phase 2B: repair-eta handler ────────────────────────────────────────────
+
+const RO_STATUS_COMPLETION: Record<string, number> = {
+  open: 5,
+  in_progress: 60,
+  awaiting_parts: 70,
+  completed: 100,
+}
+
+function handleRepairEta(roId: string, res: Response): Response {
+  console.log(`[Tool] repair-eta ro=${roId}`)
+  if (!roId) return res.status(400).json({ error: 'ro_id is required' })
+
+  for (const c of MOCK_CUSTOMERS) {
+    const ro = c.openRepairOrders.find((r) => r.roNumber === roId)
+    if (!ro) continue
+    return res.json({
+      ro_id: ro.roNumber,
+      customer_id: c.id,
+      vehicle_id: ro.vehicleId,
+      status: ro.status,
+      eta: ro.estimatedCompletion ?? null,
+      technician: ro.advisorName,
+      notes: ro.description,
+      completion_pct: RO_STATUS_COMPLETION[ro.status] ?? 50,
+      total_estimate: ro.totalEstimate,
+      source: 'mock',
+    })
+  }
+
+  return res.status(404).json({ error: `RO ${roId} not found` })
+}
+
+// ─── Phase 2B: warranty handler ──────────────────────────────────────────────
+
+function findVehicleAcrossMocks(vehicleId: string): { customer: Customer; vehicle: Vehicle } | null {
+  for (const c of MOCK_CUSTOMERS) {
+    const v = c.vehicles.find((veh) => veh.id === vehicleId || veh.vin === vehicleId)
+    if (v) return { customer: c, vehicle: v }
+  }
+  return null
+}
+
+/**
+ * Porsche factory new-car warranty in Canada/US is 4 yrs / 80,000 km. CPO
+ * extends by 2 yrs after the factory term. Mock mode derives plausible dates
+ * from the vehicle's model year. Phase 3 will replace with Fortellis.
+ */
+function handleWarranty(vehicleId: string, res: Response): Response {
+  console.log(`[Tool] warranty vehicle=${vehicleId}`)
+  if (!vehicleId) return res.status(400).json({ error: 'vehicle_id is required' })
+
+  const match = findVehicleAcrossMocks(vehicleId)
+  if (!match) return res.status(404).json({ error: `Vehicle ${vehicleId} not found` })
+
+  const { customer, vehicle } = match
+  const inServiceYear = vehicle.year
+  const factoryExpiry = `${inServiceYear + 4}-12-31`
+  const cpoExpiry = `${inServiceYear + 6}-12-31`
+  const today = new Date()
+  const factoryExpiryDate = new Date(factoryExpiry)
+  const cpoExpiryDate = new Date(cpoExpiry)
+
+  let warrantyStatus: 'active' | 'expiring_soon' | 'expired'
+  if (factoryExpiryDate > today) {
+    const daysLeft = Math.floor((factoryExpiryDate.getTime() - today.getTime()) / 86_400_000)
+    warrantyStatus = daysLeft < 180 ? 'expiring_soon' : 'active'
+  } else if (cpoExpiryDate > today) {
+    warrantyStatus = 'active'
+  } else {
+    warrantyStatus = 'expired'
+  }
+
+  // Recalls live on the customer in mocks (not on the vehicle), so we surface
+  // them all. In real CDK they'd be filtered to this VIN.
+  const openRecalls = customer.openRecalls.filter((r) => r.status === 'open')
+
+  return res.json({
+    vehicle_id: vehicle.id,
+    vin: vehicle.vin,
+    warranty_status: warrantyStatus,
+    factory_expiry: factoryExpiry,
+    cpo_expiry: cpoExpiry,
+    mileage: vehicle.mileage,
+    open_recalls: openRecalls.length,
+    recall_descriptions: openRecalls.map((r) => ({
+      nhtsa_id: r.nhtsa_id,
+      component: r.component,
+      description: r.description,
+      remedy: r.remedy,
+    })),
+    source: 'mock',
   })
 }
 
