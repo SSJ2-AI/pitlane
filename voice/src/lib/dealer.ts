@@ -1,5 +1,6 @@
 import { config } from '../config'
 import { getDealerIdForConversation, getSupabase } from './supabase'
+import { decrypt, isEncrypted } from './secrets'
 
 // ─── PitLane multi-tenancy ───────────────────────────────────────────────────
 //
@@ -158,6 +159,77 @@ export async function resolveDealerForCall(conversationId?: string | null): Prom
     const dealerId = await getDealerIdForConversation(conversationId)
     if (!dealerId) return DEFAULT_DEALER
     return getDealerById(dealerId)
+}
+
+// ─── Decrypt-on-demand credentials ───────────────────────────────────────────
+//
+// IMPORTANT: getDealerByPhone/getDealerById return the dealer row AS STORED,
+// which means fortellis_client_secret stays in its encrypted `enc:v1:...`
+// form. We never decrypt eagerly into the Dealer object because any code
+// path that logs `dealer` or returns it from an API would then leak
+// plaintext.
+//
+// Phase 3 (CDK write-back) will call getDealerFortellisCredentials() at the
+// exact moment it needs the secret to construct an OAuth client. The
+// plaintext lives only inside that call chain.
+
+export interface FortellisCredentials {
+    clientId: string
+    clientSecret: string
+    subscriptionId: string
+}
+
+export class MissingFortellisCredentialsError extends Error {
+    constructor(public readonly dealerId: string, public readonly missing: string[]) {
+        super(`Dealer ${dealerId} is missing Fortellis credentials: ${missing.join(', ')}`)
+        this.name = 'MissingFortellisCredentialsError'
+    }
+}
+
+export class FortellisDecryptionError extends Error {
+    constructor(public readonly dealerId: string, cause: unknown) {
+        super(`Failed to decrypt Fortellis credentials for dealer ${dealerId}: ${
+            cause instanceof Error ? cause.message : String(cause)
+        }`)
+        this.name = 'FortellisDecryptionError'
+    }
+}
+
+/**
+ * Resolve a dealer's plaintext Fortellis credentials at the point of use.
+ * Pulls from the encrypted `dealers` row when available, falling back to
+ * environment variables (the legacy single-dealer config path).
+ *
+ * Never log the return value of this function.
+ */
+export function getDealerFortellisCredentials(dealer: Dealer): FortellisCredentials {
+    const clientId =
+        dealer.fortellis_client_id != null && dealer.fortellis_client_id.length > 0
+            ? safeDecrypt(dealer.id, dealer.fortellis_client_id)
+            : process.env.FORTELLIS_CLIENT_ID ?? ''
+    const clientSecret =
+        dealer.fortellis_client_secret != null && dealer.fortellis_client_secret.length > 0
+            ? safeDecrypt(dealer.id, dealer.fortellis_client_secret)
+            : process.env.FORTELLIS_CLIENT_SECRET ?? ''
+    const subscriptionId =
+        dealer.fortellis_subscription_id ?? process.env.FORTELLIS_SUBSCRIPTION_ID ?? ''
+
+    const missing: string[] = []
+    if (!clientId) missing.push('client_id')
+    if (!clientSecret) missing.push('client_secret')
+    if (!subscriptionId) missing.push('subscription_id')
+    if (missing.length > 0) throw new MissingFortellisCredentialsError(dealer.id, missing)
+
+    return { clientId, clientSecret, subscriptionId }
+}
+
+function safeDecrypt(dealerId: string, value: string): string {
+    if (!isEncrypted(value)) return value
+    try {
+        return decrypt(value)
+    } catch (err) {
+        throw new FortellisDecryptionError(dealerId, err)
+    }
 }
 
 /**
