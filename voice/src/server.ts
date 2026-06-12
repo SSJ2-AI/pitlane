@@ -66,6 +66,12 @@ app.get('/health', (_req, res) => {
     version: PKG_VERSION,
     build_started_at: BUILD_STARTED_AT,
     git_sha: process.env.RAILWAY_GIT_COMMIT_SHA ?? process.env.GIT_COMMIT_SHA ?? null,
+    // Surfaced for vendor-risk reviews — dealership IT teams want to be able
+    // to verify Canadian data residency without access to our cloud console.
+    region: process.env.RAILWAY_REGION
+      ?? process.env.DEPLOY_REGION
+      ?? process.env.AWS_REGION
+      ?? null,
     timestamp: new Date().toISOString(),
     mode: config.useMockData ? 'mock' : 'live',
     default_dealer: {
