@@ -84,6 +84,60 @@ key which *bypasses RLS*, so today's writes/reads aren't constrained by
 the policy — the policy is the safety net for any future caller that
 uses an anon or per-user JWT key.
 
+## Field-level encryption
+
+`dealers.fortellis_client_secret` is encrypted at rest with **AES-256-GCM**
+envelope encryption. The encryption key (`FORTELLIS_ENCRYPTION_KEY`) lives
+in a Railway env var, **not** in Supabase — so a Supabase service-role-key
+leak alone cannot decrypt secrets. Two-system compromise required.
+
+- Encoded format: `enc:v1:<iv_b64>:<authTag_b64>:<ciphertext_b64>`.
+- The `enc:v1:` prefix makes encrypted values self-identifying and
+  forward-compatible with future key rotation (`enc:v2:…`).
+- Implementation: `voice/src/lib/secrets.ts`.
+- `dealer.fortellis_client_secret` is **never decrypted eagerly** into the
+  in-memory `Dealer` object. `getDealerFortellisCredentials(dealer)` is the
+  only path that produces plaintext — used at the OAuth-flow call site, so
+  the plaintext lifetime is bounded.
+
+### Migration (one-shot per environment)
+
+After deploying a build that includes Phase 5, run from the voice service:
+
+```bash
+# Generate a key once, store as FORTELLIS_ENCRYPTION_KEY in Railway.
+openssl rand -base64 32
+
+# Sanity-check the key before touching the database.
+npm run encrypt-secrets:selftest
+
+# Dry-run: report which rows would be encrypted, change nothing.
+npm run encrypt-secrets:dry-run
+
+# Encrypt all plaintext fortellis_client_secret values in the dealers table.
+npm run encrypt-secrets
+```
+
+The migration is **idempotent**: rows already encrypted (i.e. prefixed
+`enc:v1:`) are skipped. Re-running is safe.
+
+## Data residency
+
+- **PII at rest** lives in Supabase. Configure your Supabase project in
+  `ca-central-1` (Toronto) to meet PIPEDA / Quebec Law 25 residency
+  expectations.
+- **Voice service compute** runs on Railway, which has **no Canadian
+  region as of June 2026**. The closest geographic option is `us-east4`
+  (Virginia), pinned in `voice/railway.toml`. The voice service is
+  stateless — customer data only transits Railway nodes in flight
+  (TLS-terminated). The compliance anchor is Supabase, not Railway.
+- Verify both via curl:
+  ```bash
+  curl https://pitlane-voice-production.up.railway.app/health
+  # → residency: { voice_compute_region, supabase_residency_target, notes }
+  # → integrations: { supabase, twilio, field_encryption }
+  ```
+
 ## Phase 5 — SMS layer
 
 PitLane sends transactional SMS through Twilio via two endpoints, both backed
@@ -279,6 +333,20 @@ USE_MOCK_DATA=true               # set false once CDK is wired (Phase 4)
 TWILIO_ACCOUNT_SID=<>
 TWILIO_AUTH_TOKEN=<>
 TWILIO_FROM_PHONE=+1XXXXXXXXXX
+
+# ─── Field-level encryption (Fortellis client_secret) ────────────────
+# Required when dealers.fortellis_client_secret holds real values.
+# Generate one with: openssl rand -base64 32
+# Accepts hex (64 chars) or base64. Must decode to 32 bytes.
+# Never store this key in Supabase — that's the whole point of
+# envelope encryption. Railway env var only.
+FORTELLIS_ENCRYPTION_KEY=<>
+
+# ─── Optional residency stamps surfaced via /health ─────────────────
+# Railway sets RAILWAY_REGION automatically. SUPABASE_REGION is set
+# by you so IT can verify the data-at-rest anchor without dashboard
+# access.
+SUPABASE_REGION=ca-central-1
 
 # ─── Phase 2A: Post-call intelligence ─────────────────────────────────
 # When OPENAI_API_KEY is set, /webhook/post-call uses GPT-4o-mini to

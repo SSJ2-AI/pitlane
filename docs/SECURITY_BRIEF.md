@@ -52,7 +52,7 @@ After the call ends:
 | Ask | Status | Notes |
 |---|---|---|
 | **SOC 2 Type II** | In progress | Controls implemented per the AICPA TSC; third-party audit scheduled. We can share our SOC 2 readiness assessment + internal control matrix on request under NDA. |
-| **PIPEDA compliance (Canada)** | Yes | Data residency in Canadian cloud regions (`ca-central` on Supabase, `us-west-1` on Railway with `ca-central-1` migration in flight before launch). Customer data retention configurable per dealership. STOP/HELP SMS opt-out flows are wired (`sms_consent` table). |
+| **PIPEDA compliance (Canada)** | Yes | PII at rest in Supabase `ca-central-1` (Toronto). Voice service compute runs on Railway `us-east4` (closest to Toronto on Railway's current lineup — no Canadian region available as of June 2026; voice is stateless, data only transits in flight under TLS). Customer data retention configurable per dealership. STOP/HELP SMS opt-out flows are wired (`sms_consent` table). Verifiable via `GET /health` (`residency` block). |
 | **Third-party penetration test** | Scheduled | OWASP-aligned external pen-test ahead of the first production rollout. The remediation report will accompany this brief. |
 
 ---
@@ -85,8 +85,8 @@ After the call ends:
 
 ### 3.5 Encryption
 - **In transit:** HTTPS only, TLS 1.2+ on every public endpoint. WebSocket screen-pop uses WSS.
-- **At rest:** Supabase managed PostgreSQL with AES-256 at rest. ElevenLabs handles encryption of recorded audio; we only persist the text transcript.
-- Fortellis client credentials are stored as Railway environment variables; the field exists in `dealers.fortellis_client_secret` as a placeholder for application-layer AES-256 encryption (planned ahead of multi-dealer rollout).
+- **At rest (Supabase):** AES-256 at the platform layer, managed by Supabase.
+- **At rest (application-layer):** `dealers.fortellis_client_secret` is **additionally** encrypted at the application layer with AES-256-GCM (`enc:v1:` envelope format). The encryption key lives in a Railway env var (`FORTELLIS_ENCRYPTION_KEY`) — **never in Supabase** — so a Supabase service-role-key compromise alone cannot decrypt dealer credentials. Two-system compromise required. Decryption happens on demand at the Fortellis OAuth call site (not eagerly), bounding plaintext lifetime to the OAuth handshake itself.
 
 ### 3.6 Business continuity
 - Railway managed services with `restartPolicyType: ON_FAILURE` + `restartPolicyMaxRetries: 3` on the voice service. Healthcheck at `/health` with 30s timeout.

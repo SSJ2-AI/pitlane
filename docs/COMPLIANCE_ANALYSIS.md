@@ -216,8 +216,18 @@ Functionally workable. Material sales-cycle friction. Don't recommend.
 
 ### Three things to do this week (if Lithia is to convert)
 
-1. **Sign Vanta or Drata.** Kick off SOC 2 Type I. ~$10-30K.
-2. **Migrate Supabase to `ca-central-1`** and switch Railway to a Canadian region. Half a day.
-3. **Implement `fortellis_client_secret` envelope encryption.** Half a day.
+1. **Sign Vanta or Drata.** Kick off SOC 2 Type I. ~$10-30K. ⏳ external
+2. **Migrate Supabase to `ca-central-1`.** ~Half a day in the Supabase console (dump + restore). ⏳ external
+   - **Railway has no Canadian region as of June 2026.** Lineup is
+     us-west2, us-east4, europe-west4, asia-southeast1, asia-southeast2.
+     We pinned `us-east4` (Virginia, closest to Toronto) in
+     `voice/railway.toml` with a TODO to switch when Railway ships one.
+     The voice service is stateless — Supabase is the actual residency
+     anchor for the PII-at-rest claim. `/health` surfaces both regions
+     so IT can verify.
+3. **Envelope encryption for `dealers.fortellis_client_secret`.** ✅ shipped on Phase 5 branch.
+   - AES-256-GCM, key in `FORTELLIS_ENCRYPTION_KEY` env var on Railway, never in Supabase.
+   - `enc:v1:<iv>:<tag>:<ct>` format, idempotent migration via `npm run encrypt-secrets`, self-tested at build time.
+   - Decrypted on demand via `getDealerFortellisCredentials(dealer)`, never eagerly.
 
 These move the security brief from "in progress" promises to "shipped" facts before the IT review starts.

@@ -12,6 +12,9 @@ import smsRouter from './routes/sms'
 import { setGlobalNextCaller, setPhoneOverride, listOverrides } from './mock/sessionOverrides'
 import { MOCK_CUSTOMERS } from './mock/customers'
 import { DEFAULT_DEALER } from './lib/dealer'
+import { isEncryptionConfigured } from './lib/secrets'
+import { isSupabaseConfigured } from './lib/supabase'
+import { isTwilioConfigured } from './lib/twilio'
 
 const app = express()
 const httpServer = createServer(app)
@@ -68,12 +71,23 @@ app.get('/health', (_req, res) => {
     git_sha: process.env.RAILWAY_GIT_COMMIT_SHA ?? process.env.GIT_COMMIT_SHA ?? null,
     // Surfaced for vendor-risk reviews — dealership IT teams want to be able
     // to verify Canadian data residency without access to our cloud console.
-    region: process.env.RAILWAY_REGION
-      ?? process.env.DEPLOY_REGION
-      ?? process.env.AWS_REGION
-      ?? null,
+    // Note: voice service is stateless; PII at rest lives in Supabase, so
+    // `supabase_residency_target` is the meaningful compliance anchor.
+    residency: {
+      voice_compute_region: process.env.RAILWAY_REGION
+        ?? process.env.DEPLOY_REGION
+        ?? process.env.AWS_REGION
+        ?? null,
+      supabase_residency_target: process.env.SUPABASE_REGION ?? 'ca-central-1',
+      notes: 'PII at rest lives in Supabase. Voice compute is stateless; data only transits Railway nodes in flight (TLS-terminated).',
+    },
     timestamp: new Date().toISOString(),
     mode: config.useMockData ? 'mock' : 'live',
+    integrations: {
+      supabase: isSupabaseConfigured(),
+      twilio: isTwilioConfigured(),
+      field_encryption: isEncryptionConfigured(),
+    },
     default_dealer: {
       id: DEFAULT_DEALER.id,
       name: DEFAULT_DEALER.name,
