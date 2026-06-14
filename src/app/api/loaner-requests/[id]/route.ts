@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getSupabase } from '@/lib/supabase';
+import { resolveDealerForRequest } from '@/lib/dealer';
 
 // PATCH /api/loaner-requests/:id
 //   body: { status: 'approved' | 'declined' | 'fulfilled', resolved_by?, notes? }
@@ -42,10 +43,13 @@ export async function PATCH(request: Request, context: RouteContext) {
     }
     if (typeof body.notes === 'string') update.notes = body.notes;
 
+    const dealer = await resolveDealerForRequest(request);
+
     const { data, error } = await supabase
         .from('loaner_requests')
         .update(update)
         .eq('id', id)
+        .eq('dealer_id', dealer.id)
         .select('*')
         .single();
 

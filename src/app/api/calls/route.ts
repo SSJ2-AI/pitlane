@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getSupabase, isSupabaseConfigured, type CallLogRow } from '@/lib/supabase';
+import { resolveDealerForRequest } from '@/lib/dealer';
 
 // GET /api/calls
 //   ?customer_id=cust_001          filter by customer
@@ -36,9 +37,12 @@ export async function GET(request: Request) {
     const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(1, rawLimit), MAX_LIMIT) : DEFAULT_LIMIT;
     const offset = Math.max(0, Number(searchParams.get('offset') ?? 0)) || 0;
 
+    const dealer = await resolveDealerForRequest(request);
+
     let query = supabase
         .from('call_logs')
         .select('*', { count: 'exact' })
+        .eq('dealer_id', dealer.id)
         .order('started_at', { ascending: false })
         .range(offset, offset + limit - 1);
 
@@ -60,6 +64,7 @@ export async function GET(request: Request) {
         calls: (data ?? []) as CallLogRow[],
         total: count ?? data?.length ?? 0,
         persistence: 'supabase' as const,
+        dealer: { id: dealer.id, name: dealer.name },
         filters: { customer_id: customerId, outcome, since, until, limit, offset },
         configured: isSupabaseConfigured(),
     });

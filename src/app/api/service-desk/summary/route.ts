@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getSupabase, type AppointmentRow, type LoanerRequestRow, type UpsellRow } from '@/lib/supabase';
+import { resolveDealerForRequest } from '@/lib/dealer';
 
 // GET /api/service-desk/summary
 //
@@ -21,7 +22,7 @@ function todayIso(): string {
     return new Date().toISOString().slice(0, 10);
 }
 
-export async function GET() {
+export async function GET(request: Request) {
     const supabase = getSupabase();
     const today = todayIso();
 
@@ -36,21 +37,26 @@ export async function GET() {
         });
     }
 
+    const dealer = await resolveDealerForRequest(request);
+
     const [arrivalsRes, loanersRes, upsellsRes] = await Promise.all([
         supabase
             .from('appointments')
             .select('*')
+            .eq('dealer_id', dealer.id)
             .eq('date', today)
             .neq('status', 'cancelled')
             .order('time', { ascending: true }),
         supabase
             .from('loaner_requests')
             .select('*')
+            .eq('dealer_id', dealer.id)
             .eq('status', 'pending')
             .order('created_at', { ascending: false }),
         supabase
             .from('upsells')
             .select('*')
+            .eq('dealer_id', dealer.id)
             .eq('status', 'pending')
             .order('value_est', { ascending: false, nullsFirst: false }),
     ]);
@@ -68,6 +74,7 @@ export async function GET() {
     return NextResponse.json({
         persistence: 'supabase' as const,
         today,
+        dealer: { id: dealer.id, name: dealer.name },
         arrivals,
         loaner_queue: loaners,
         upsells,

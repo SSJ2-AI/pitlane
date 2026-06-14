@@ -1,0 +1,32 @@
+# PitLane Voice — Railway deploy config
+#
+# Replaces the legacy voice/railway.json. Adds a region preference.
+#
+# IMPORTANT — Canadian data residency:
+#
+# As of June 2026, Railway's public regions are us-east4, us-west2,
+# europe-west4, asia-southeast1, asia-southeast2 — there is NO Canadian
+# region. The closest geographic option is us-east4 (Virginia).
+#
+# For PIPEDA / Quebec Law 25 purposes the real data-residency anchor is
+# Supabase (configure the Supabase project in `ca-central-1` — that's
+# where the PII actually lives at rest). The voice service running on
+# Railway is stateless and only handles PII in flight, so its geographic
+# location is a latency + sales-narrative concern, not a hard compliance
+# requirement.
+#
+# TODO: switch to a Canadian region the moment Railway ships one.
+# Track: https://railway.com/changelog
+
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "npm run build && npm start"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+# Closest to Toronto on Railway's current lineup. Override per environment
+# by setting the service's Settings → Region in the Railway dashboard.
+region = "us-east4"

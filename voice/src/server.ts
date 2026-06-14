@@ -8,8 +8,13 @@ import toolsRouter from './routes/tools'
 import callsRouter from './routes/calls'
 import eventsRouter from './routes/events'
 import webhookRouter from './routes/webhook'
+import smsRouter from './routes/sms'
 import { setGlobalNextCaller, setPhoneOverride, listOverrides } from './mock/sessionOverrides'
 import { MOCK_CUSTOMERS } from './mock/customers'
+import { DEFAULT_DEALER } from './lib/dealer'
+import { isEncryptionConfigured } from './lib/secrets'
+import { isSupabaseConfigured } from './lib/supabase'
+import { isTwilioConfigured } from './lib/twilio'
 
 const app = express()
 const httpServer = createServer(app)
@@ -44,14 +49,66 @@ app.get('/dashboard', (_req, res) => {
 })
 app.get('/', (_req, res) => res.redirect('/dashboard'))
 
-// Health check — Railway uses this
+// Health check — Railway uses this. Includes build_stamp + git_sha so we can
+// tell deploys apart by inspection ("is the new code actually live?"). The
+// build_stamp is captured at module load so it reflects when this process
+// started, which is when Railway last cycled the deploy.
+const BUILD_STARTED_AT = new Date().toISOString()
+const PKG_VERSION: string = (() => {
+  try {
+    return (require('../package.json') as { version: string }).version
+  } catch {
+    return 'unknown'
+  }
+})()
+
 app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     service: 'pitlane-voice',
-    version: '1.0.0',
+    version: PKG_VERSION,
+    build_started_at: BUILD_STARTED_AT,
+    git_sha: process.env.RAILWAY_GIT_COMMIT_SHA ?? process.env.GIT_COMMIT_SHA ?? null,
+    // Surfaced for vendor-risk reviews — dealership IT teams want to be able
+    // to verify Canadian data residency without access to our cloud console.
+    // Note: voice service is stateless; PII at rest lives in Supabase, so
+    // `supabase_residency_target` is the meaningful compliance anchor.
+    residency: {
+      voice_compute_region: process.env.RAILWAY_REGION
+        ?? process.env.DEPLOY_REGION
+        ?? process.env.AWS_REGION
+        ?? null,
+      supabase_residency_target: process.env.SUPABASE_REGION ?? 'ca-central-1',
+      notes: 'PII at rest lives in Supabase. Voice compute is stateless; data only transits Railway nodes in flight (TLS-terminated).',
+    },
     timestamp: new Date().toISOString(),
     mode: config.useMockData ? 'mock' : 'live',
+    integrations: {
+      supabase: isSupabaseConfigured(),
+      twilio: isTwilioConfigured(),
+      field_encryption: isEncryptionConfigured(),
+    },
+    default_dealer: {
+      id: DEFAULT_DEALER.id,
+      name: DEFAULT_DEALER.name,
+      brand: DEFAULT_DEALER.brand,
+      phone_number: DEFAULT_DEALER.phone_number,
+    },
+    routes: {
+      pre_call_webhook: '/webhook/pre-call',
+      post_call_webhook: '/webhook/post-call',
+      tools: [
+        '/tools/customer-lookup',
+        '/tools/book-appointment',
+        '/tools/log-upsell',
+        '/tools/request-loaner',
+        '/tools/check-ro-status',
+        '/tools/repair-eta/:ro_id',
+        '/tools/warranty/:vehicle_id',
+        '/tools/send-sms',
+      ],
+      sms: '/sms/send',
+    },
   })
 })
 
@@ -68,6 +125,10 @@ app.use('/calls', callsRouter)
 
 // ElevenLabs post-call events
 app.use('/events', eventsRouter)
+
+// Phase 5: SMS dispatch (Twilio). Dry-runs gracefully when TWILIO_* env vars
+// are unset; consent check + Supabase log run regardless.
+app.use('/sms', smsRouter)
 
 // ─── Demo: list all available mock CDK customers ─────────────────────────────
 app.get('/demo/customers', (_req, res) => {

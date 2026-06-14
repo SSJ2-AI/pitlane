@@ -19,6 +19,7 @@ import { broadcastScreenPop } from '../ws/screenPop'
 import { endCall, getCall } from '../store/callStore'
 import { insertLoanerRequest, isSupabaseConfigured, upsertCallLog } from './supabase'
 import { summariseTranscript, type CallSummary, type TranscriptTurn } from './summarizer'
+import { DEFAULT_DEALER, type Dealer } from './dealer'
 import type { Customer } from '../types'
 
 export type PostCallStatus = 'completed' | 'failed' | 'no_answer'
@@ -31,6 +32,8 @@ export interface ProcessPostCallInput {
   transcript: TranscriptTurn[]
   status: PostCallStatus
   startedAt?: string
+  /** Multi-tenancy: dealer that owns this call. Defaults to DEFAULT_DEALER. */
+  dealer?: Dealer | null
 }
 
 export interface ProcessPostCallResult {
@@ -53,6 +56,7 @@ export function transcriptToText(transcript: TranscriptTurn[]): string {
 
 export async function processPostCall(input: ProcessPostCallInput): Promise<ProcessPostCallResult> {
   const phone = (input.callerPhone ?? '').trim()
+  const dealer = input.dealer ?? DEFAULT_DEALER
 
   let customer: Customer | null = null
   if (phone) {
@@ -71,6 +75,7 @@ export async function processPostCall(input: ProcessPostCallInput): Promise<Proc
     conversation_id: input.conversationId ?? null,
     caller_phone: phone || 'unknown',
     customer_id: customer?.id ?? null,
+    dealer_id: dealer.id,
     direction: 'inbound',
     duration_secs: input.durationSeconds,
     transcript: input.transcript as unknown as unknown[],
@@ -85,6 +90,7 @@ export async function processPostCall(input: ProcessPostCallInput): Promise<Proc
     loanerRequestId = await insertLoanerRequest({
       call_log_id: callLogId,
       customer_id: customer.id,
+      dealer_id: dealer.id,
       requested_date: customer.upcomingAppointments[0]?.date ?? null,
       notes: summary.summary_text || null,
     })

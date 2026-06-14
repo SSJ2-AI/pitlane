@@ -46,6 +46,153 @@ The repo has two deployable units:
                                    └─────────────────────────┘
 ```
 
+## Multi-tenancy
+
+Every operational table (`call_logs`, `appointments`, `upsells`,
+`loaner_requests`, `sms_log`, `sms_consent`, `cdk_sync_queue`) carries a
+`dealer_id` FK to the new `dealers` table. The intended deploy model is
+**one Railway deploy per service + one Supabase project, hosting many
+dealerships**. Twilio number → dealer routing happens in the voice
+service; subdomain → dealer routing happens on the dashboard.
+
+| Where | Resolution strategy |
+|---|---|
+| Voice — pre/post-call webhook | `getDealerByPhone(called_number)` → `dealers.phone_number`. Falls back to `DEFAULT_DEALER` (Porsche Toronto) when no row matches. |
+| Voice — Aria tools | `resolveDealerForCall(conversation_id)` → reads `call_logs.dealer_id` set by pre-call. |
+| Dashboard — every `/api/*` route | `resolveDealerForRequest(request)` → `?dealer_id=` query → `x-dealer-id` header → subdomain (`porsche-toronto.pitlane.ai` → `dealers.subdomain`) → DEFAULT. |
+
+### Adding a new dealer
+
+1. Provision a Twilio number.
+2. Insert a `dealers` row with `phone_number`, `subdomain`, `brand`,
+   `elevenlabs_agent_id` (reuse the brand-level agent), and CDK creds.
+3. Point Twilio's voice webhook at the existing
+   `https://<voice>/webhook/pre-call` + `https://<voice>/webhook/post-call`.
+4. (Optional) Add the subdomain to your DNS / hosting so the dashboard
+   resolves it.
+
+Zero code changes. The shared agent uses dynamic variables for per-dealer
+branding (`{{dealership_name}}`, `{{dealership_branch}}`,
+`{{dealership_brand}}`).
+
+### RLS (defense-in-depth)
+
+Migration 0003 enables Row-Level Security on every tenanted table with a
+`dealer_isolation_*` policy that filters by `current_setting('app.current_dealer_id')`.
+The voice service and dashboard API routes use the Supabase service-role
+key which *bypasses RLS*, so today's writes/reads aren't constrained by
+the policy — the policy is the safety net for any future caller that
+uses an anon or per-user JWT key.
+
+## Field-level encryption
+
+`dealers.fortellis_client_secret` is encrypted at rest with **AES-256-GCM**
+envelope encryption. The encryption key (`FORTELLIS_ENCRYPTION_KEY`) lives
+in a Railway env var, **not** in Supabase — so a Supabase service-role-key
+leak alone cannot decrypt secrets. Two-system compromise required.
+
+- Encoded format: `enc:v1:<iv_b64>:<authTag_b64>:<ciphertext_b64>`.
+- The `enc:v1:` prefix makes encrypted values self-identifying and
+  forward-compatible with future key rotation (`enc:v2:…`).
+- Implementation: `voice/src/lib/secrets.ts`.
+- `dealer.fortellis_client_secret` is **never decrypted eagerly** into the
+  in-memory `Dealer` object. `getDealerFortellisCredentials(dealer)` is the
+  only path that produces plaintext — used at the OAuth-flow call site, so
+  the plaintext lifetime is bounded.
+
+### Migration (one-shot per environment)
+
+After deploying a build that includes Phase 5, run from the voice service:
+
+```bash
+# Generate a key once, store as FORTELLIS_ENCRYPTION_KEY in Railway.
+openssl rand -base64 32
+
+# Sanity-check the key before touching the database.
+npm run encrypt-secrets:selftest
+
+# Dry-run: report which rows would be encrypted, change nothing.
+npm run encrypt-secrets:dry-run
+
+# Encrypt all plaintext fortellis_client_secret values in the dealers table.
+npm run encrypt-secrets
+```
+
+The migration is **idempotent**: rows already encrypted (i.e. prefixed
+`enc:v1:`) are skipped. Re-running is safe.
+
+## Data residency
+
+- **PII at rest** lives in Supabase. Configure your Supabase project in
+  `ca-central-1` (Toronto) to meet PIPEDA / Quebec Law 25 residency
+  expectations.
+- **Voice service compute** runs on Railway, which has **no Canadian
+  region as of June 2026**. The closest geographic option is `us-east4`
+  (Virginia), pinned in `voice/railway.toml`. The voice service is
+  stateless — customer data only transits Railway nodes in flight
+  (TLS-terminated). The compliance anchor is Supabase, not Railway.
+- Verify both via curl:
+  ```bash
+  curl https://pitlane-voice-production.up.railway.app/health
+  # → residency: { voice_compute_region, supabase_residency_target, notes }
+  # → integrations: { supabase, twilio, field_encryption }
+  ```
+
+## Phase 5 — SMS layer
+
+PitLane sends transactional SMS through Twilio via two endpoints, both backed
+by a single dispatcher (`voice/src/lib/sms.ts`) that:
+
+1. Renders one of seven canonical templates (or echoes a `custom_text`).
+2. Checks `sms_consent.opted_in` for the customer.
+3. Calls Twilio via `voice/src/lib/twilio.ts` (dry-runs when `TWILIO_*` env
+   vars are unset).
+4. Writes an `sms_log` row with the Twilio SID, status, and FK back-refs to
+   the originating call_log / appointment / loaner_request.
+
+| Route | Caller | Purpose |
+|---|---|---|
+| `POST /sms/send` | PitLane dashboard, internal | Generic dispatcher. Accepts `customer_id` or `to_phone`, any `message_type`, optional `custom_text` override, `context` bag. |
+| `POST /tools/send-sms` | Aria (ElevenLabs) | Mid-call tool. `customer_id` + `message_type` (+ optional `custom_text` + `context`). Records a `NOTE_ADDED` event on the call. |
+
+Message types: `appointment_confirmation`, `appointment_reminder`,
+`loaner_confirmed`, `car_ready`, `parts_arrived`, `update`, `custom`.
+
+**Auto-confirmation**: every successful `POST /tools/book-appointment`
+automatically fires an `appointment_confirmation` SMS — no extra Aria
+tool call required.
+
+**Apply the migration before going live**:
+`supabase/migrations/0002_sms_layer.sql` adds `sms_log` (audit) and
+`sms_consent` (opt-in/out). Apply with `supabase db push` or paste into
+the SQL editor.
+
+## Deployment troubleshooting
+
+The voice service deploy on Railway runs from the `voice/` subdirectory
+and has its own `voice/railway.json`. If new endpoints come back as 404
+("Cannot POST /webhook/pre-call"), the running deploy is stale.
+
+`/health` exposes the live build metadata for diagnosis:
+
+```json
+{
+  "version": "1.1.0",
+  "build_started_at": "2026-06-11T19:47:37.864Z",
+  "git_sha": "<from RAILWAY_GIT_COMMIT_SHA>",
+  "routes": { ... }
+}
+```
+
+If `/health` reports an older `version` than `voice/package.json`, the
+Railway service hasn't picked up the latest main. Fix:
+
+1. Railway → `pitlane-voice` service → **Settings** → **Source**: confirm
+   the repo is `SSJ2-AI/pitlane`, branch is `main`, **Root Directory** is
+   `voice`, and **Watch Paths** is empty (or `voice/**`).
+2. Settings → **Deploys**: confirm automatic deploys are ON.
+3. Hit **Deploy** to force a rebuild from the latest commit.
+
 ## Dashboard surface
 
 | Route | Purpose |
@@ -65,6 +212,7 @@ The repo has two deployable units:
 | `repair_eta` | `GET /tools/repair-eta/:ro_id` | Status + ETA for an existing repair order. Mock-derived today, Fortellis RO Async in Phase 3. |
 | `warranty` | `GET /tools/warranty/:vehicle_id` | Factory + CPO expiry, open recalls. Mock-derived today, Fortellis Vehicle API in Phase 3. |
 | `check_ro_status` | `POST GET /tools/check-ro-status` | Legacy lookup of open RO by customer or RO number (`repair_eta` is the preferred replacement). |
+| `send_sms` | `POST GET /tools/send-sms` | Sends a transactional SMS to the caller via Twilio. `message_type` selects one of seven templates; `custom_text` overrides. |
 
 All tools accept `call_id` (the ElevenLabs conversation id) so the resulting Supabase row is FK-linked back to the right `call_logs.id`. The pre-call webhook will have already opened the `call_logs` row; the tools resolve the conversation_id via `getOrCreateCallLogIdForConversation`.
 
@@ -112,8 +260,13 @@ All tools accept `call_id` (the ElevenLabs conversation id) so the resulting Sup
 | 2B | 5 new Aria tools (`book-appointment`, `log-upsell`, `request-loaner`, `repair-eta`, `warranty`) wired to Supabase + CDK sync queue. | ✅ this PR |
 | 4A | `/calls` page: list + filters (customer / outcome / date range), call detail drawer with transcript, AI summary, appointments booked, upsells flagged, loaner requests. Honors `?customer_id=…` deep links from the dashboard. | ✅ |
 | 4B | `/service-desk` page: today's arrivals, loaner queue with Approve/Decline actions, upsell pipeline with Accepted/Declined actions, live 15 s auto-refresh. | ✅ this PR |
-| 4C | Customer-profile enhancements: `WarrantyBadge` (live from `/tools/warranty`) with status + factory/CPO expiry + recall list; `CustomerUpsellsPanel` reading from Supabase; "Open full call log" deep link. | ✅ this PR |
-| 3 (new) | Full CDK write-back via Fortellis: `appointments` + notes + RO updates pushed through `cdk_sync_queue` worker. | ⏭ next |
+| 4C | Customer-profile enhancements: `WarrantyBadge` (live from `/tools/warranty`) with status + factory/CPO expiry + recall list; `CustomerUpsellsPanel` reading from Supabase; "Open full call log" deep link. | ✅ |
+| 5 | SMS layer: Twilio dispatcher + 7 templates + sms_log/sms_consent schema + auto-confirmation on book-appointment + `POST /tools/send-sms` Aria tool + `POST /sms/send` generic. Observable `/health` build-stamp. | ✅ this PR |
+| 6 | Full CDK data pull (closed ROs, technicians, parts, loaner fleet, capacity) hourly into Supabase for analytics. | ⏭ next |
+| 7 | `/analytics` page — service manager BI: revenue, fill rate, upsell conversion, retention, AI weekly insights. | ⏭ |
+| 8 | Proactive outreach: service-interval reminders, recall follow-up, warranty expiry, declined-upsell re-engagement, weekly revenue-opportunity email. | ⏭ |
+| 9 | `/book` public customer portal — xtime replacement. | ⏭ |
+| 3 (new) | Full CDK write-back via Fortellis: `appointments` + notes + RO updates pushed through `cdk_sync_queue` worker. | ⏭ |
 
 ## Development
 
@@ -172,6 +325,28 @@ PITLANE_VOICE_API_KEY=<shared secret with dashboard>
 DEALERSHIP_NAME=Porsche Toronto
 DEALERSHIP_BRANCH=Don Mills Road
 USE_MOCK_DATA=true               # set false once CDK is wired (Phase 4)
+
+# ─── Phase 5: SMS via Twilio ──────────────────────────────────────────
+# When all three are set, /sms/send and /tools/send-sms dispatch real
+# Twilio messages. Unset = dry-run mode (templates still render + are
+# logged to sms_log if Supabase is configured).
+TWILIO_ACCOUNT_SID=<>
+TWILIO_AUTH_TOKEN=<>
+TWILIO_FROM_PHONE=+1XXXXXXXXXX
+
+# ─── Field-level encryption (Fortellis client_secret) ────────────────
+# Required when dealers.fortellis_client_secret holds real values.
+# Generate one with: openssl rand -base64 32
+# Accepts hex (64 chars) or base64. Must decode to 32 bytes.
+# Never store this key in Supabase — that's the whole point of
+# envelope encryption. Railway env var only.
+FORTELLIS_ENCRYPTION_KEY=<>
+
+# ─── Optional residency stamps surfaced via /health ─────────────────
+# Railway sets RAILWAY_REGION automatically. SUPABASE_REGION is set
+# by you so IT can verify the data-at-rest anchor without dashboard
+# access.
+SUPABASE_REGION=ca-central-1
 
 # ─── Phase 2A: Post-call intelligence ─────────────────────────────────
 # When OPENAI_API_KEY is set, /webhook/post-call uses GPT-4o-mini to

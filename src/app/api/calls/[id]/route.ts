@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getSupabase, type CallLogRow, type AppointmentRow, type UpsellRow, type LoanerRequestRow } from '@/lib/supabase';
+import { resolveDealerForRequest } from '@/lib/dealer';
 
 // GET /api/calls/:id
 //
@@ -14,7 +15,7 @@ interface RouteContext {
     params: { id: string };
 }
 
-export async function GET(_request: Request, context: RouteContext) {
+export async function GET(request: Request, context: RouteContext) {
     const supabase = getSupabase();
     if (!supabase) {
         return NextResponse.json(
@@ -28,11 +29,13 @@ export async function GET(_request: Request, context: RouteContext) {
         return NextResponse.json({ error: 'id is required' }, { status: 400 });
     }
 
+    const dealer = await resolveDealerForRequest(request);
+
     const [callResult, apptResult, upsellResult, loanerResult] = await Promise.all([
-        supabase.from('call_logs').select('*').eq('id', id).maybeSingle(),
-        supabase.from('appointments').select('*').eq('call_log_id', id),
-        supabase.from('upsells').select('*').eq('call_log_id', id),
-        supabase.from('loaner_requests').select('*').eq('call_log_id', id),
+        supabase.from('call_logs').select('*').eq('id', id).eq('dealer_id', dealer.id).maybeSingle(),
+        supabase.from('appointments').select('*').eq('call_log_id', id).eq('dealer_id', dealer.id),
+        supabase.from('upsells').select('*').eq('call_log_id', id).eq('dealer_id', dealer.id),
+        supabase.from('loaner_requests').select('*').eq('call_log_id', id).eq('dealer_id', dealer.id),
     ]);
 
     if (callResult.error) {
@@ -48,6 +51,7 @@ export async function GET(_request: Request, context: RouteContext) {
         appointments: (apptResult.data ?? []) as AppointmentRow[],
         upsells: (upsellResult.data ?? []) as UpsellRow[],
         loaner_requests: (loanerResult.data ?? []) as LoanerRequestRow[],
+        dealer: { id: dealer.id, name: dealer.name },
         persistence: 'supabase' as const,
     });
 }

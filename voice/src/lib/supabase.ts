@@ -62,6 +62,7 @@ export function getSupabase(): SupabaseClient | null {
 export interface CallLogUpsert {
   caller_phone: string
   customer_id?: string | null
+  dealer_id?: string | null
   call_sid?: string | null
   conversation_id?: string | null
   direction?: 'inbound' | 'outbound'
@@ -114,6 +115,7 @@ export interface LoanerRequestInsert {
   call_log_id?: string | null
   appointment_id?: string | null
   customer_id: string
+  dealer_id?: string | null
   requested_date?: string | null
   loaner_preferred?: string | null
   notes?: string | null
@@ -137,6 +139,7 @@ export async function insertLoanerRequest(row: LoanerRequestInsert): Promise<str
 export interface AppointmentInsert {
   call_log_id?: string | null
   customer_id: string
+  dealer_id?: string | null
   vehicle_id: string
   date: string                       // YYYY-MM-DD
   time: string                       // HH:MM(:SS)
@@ -163,6 +166,7 @@ export async function insertAppointment(row: AppointmentInsert): Promise<string 
 export interface UpsellInsert {
   call_log_id?: string | null
   customer_id: string
+  dealer_id?: string | null
   vehicle_id: string
   upsell_type: string
   description?: string | null
@@ -183,9 +187,65 @@ export async function insertUpsell(row: UpsellInsert): Promise<string | null> {
   }
 }
 
+// ─── SMS helpers (Phase 5) ────────────────────────────────────────────────────
+
+export type SmsStatus = 'queued' | 'sent' | 'delivered' | 'failed' | 'undelivered' | 'skipped'
+
+export interface SmsLogInsert {
+  customer_id?: string | null
+  dealer_id?: string | null
+  to_phone: string
+  from_phone?: string | null
+  message: string
+  message_type: string
+  twilio_sid?: string | null
+  status: SmsStatus
+  failure_reason?: string | null
+  call_log_id?: string | null
+  appointment_id?: string | null
+  loaner_request_id?: string | null
+}
+
+export async function insertSmsLog(row: SmsLogInsert): Promise<string | null> {
+  const client = getSupabase()
+  if (!client) return null
+  try {
+    const { data, error } = await client.from('sms_log').insert(row).select('id').single()
+    if (error) throw error
+    return (data as { id: string } | null)?.id ?? null
+  } catch (err) {
+    console.error('[Supabase] insertSmsLog failed:', err instanceof Error ? err.message : err)
+    return null
+  }
+}
+
+/**
+ * Returns true when we have explicit consent OR no record yet (which we treat
+ * as implicitly opted-in for the demo). Returns false ONLY for customers who
+ * have explicitly opted out — i.e. a row with opted_in = false.
+ */
+export async function hasSmsConsent(customerId: string): Promise<boolean> {
+  const client = getSupabase()
+  if (!client) return true // demo path: dry-run send is fine, log it anyway
+  try {
+    const { data, error } = await client
+      .from('sms_consent')
+      .select('opted_in')
+      .eq('customer_id', customerId)
+      .maybeSingle()
+    if (error) throw error
+    if (!data) return true // no record yet -> implicit opt-in
+    return Boolean((data as { opted_in: boolean }).opted_in)
+  } catch (err) {
+    console.error('[Supabase] hasSmsConsent failed:', err instanceof Error ? err.message : err)
+    return true
+  }
+}
+
 export interface CdkSyncEnqueue {
   entity_type: 'appointment' | 'upsell' | 'loaner_request' | 'note'
   entity_id: string
+  dealer_id?: string | null
   payload: Record<string, unknown>
 }
 
@@ -220,9 +280,35 @@ export async function queueCdkSync(row: CdkSyncEnqueue): Promise<string | null> 
 //
 // Returns the call_logs.id (uuid) which is what the FK columns expect.
 
+/**
+ * Returns the dealer_id stored on the call_logs row matching this conversation
+ * (set by the pre-call webhook). Returns null when Supabase isn't configured,
+ * when no row matches, or when dealer_id is unset. Caller defaults to
+ * DEFAULT_DEALER on null.
+ */
+export async function getDealerIdForConversation(conversationId: string): Promise<string | null> {
+  const client = getSupabase()
+  if (!client) return null
+  try {
+    const { data, error } = await client
+      .from('call_logs')
+      .select('dealer_id')
+      .eq('conversation_id', conversationId)
+      .maybeSingle()
+    if (error) {
+      console.error('[Supabase] getDealerIdForConversation error:', error.message)
+      return null
+    }
+    return (data as { dealer_id: string | null } | null)?.dealer_id ?? null
+  } catch (err) {
+    console.error('[Supabase] getDealerIdForConversation threw:', err instanceof Error ? err.message : err)
+    return null
+  }
+}
+
 export async function getOrCreateCallLogIdForConversation(
   conversationId: string,
-  hints?: { customerId?: string | null; phone?: string | null },
+  hints?: { customerId?: string | null; phone?: string | null; dealerId?: string | null },
 ): Promise<string | null> {
   const client = getSupabase()
   if (!client) return null
@@ -267,6 +353,7 @@ export async function getOrCreateCallLogIdForConversation(
         conversation_id: conversationId,
         caller_phone: hints?.phone ?? 'unknown',
         customer_id: hints?.customerId ?? null,
+        dealer_id: hints?.dealerId ?? null,
         direction: 'inbound',
         status: 'in_progress',
       })
