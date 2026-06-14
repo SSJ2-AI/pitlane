@@ -15,6 +15,8 @@ import { DEFAULT_DEALER } from './lib/dealer'
 import { isEncryptionConfigured } from './lib/secrets'
 import { isSupabaseConfigured } from './lib/supabase'
 import { isTwilioConfigured } from './lib/twilio'
+import { isFortellisLive } from './cdk/fortellis'
+import { getCdkSyncWorkerStatus, runCdkSyncTickOnce, startCdkSyncWorker } from './cdk/sync-worker'
 
 const app = express()
 const httpServer = createServer(app)
@@ -87,7 +89,9 @@ app.get('/health', (_req, res) => {
       supabase: isSupabaseConfigured(),
       twilio: isTwilioConfigured(),
       field_encryption: isEncryptionConfigured(),
+      fortellis_live: isFortellisLive(),
     },
+    cdk_sync_worker: getCdkSyncWorkerStatus(),
     default_dealer: {
       id: DEFAULT_DEALER.id,
       name: DEFAULT_DEALER.name,
@@ -215,8 +219,32 @@ app.post('/demo/simulate-inbound', (req, res) => {
 // ─── WebSocket — screen pop to PitLane dashboard ──────────────────────────────
 initWebSocketServer(httpServer)
 
+// ─── CDK sync admin ──────────────────────────────────────────────────────────
+//
+// POST /cdk/drain runs a single tick of the sync worker on demand. Used by
+// the dashboard's "force CDK sync" admin action + cron-based drain triggers.
+// Returns the per-tick counts so callers can verify a particular job moved
+// without waiting for the 30s interval.
+
+app.post('/cdk/drain', async (_req, res) => {
+  try {
+    const result = await runCdkSyncTickOnce()
+    res.json({ ok: true, ...result, worker: getCdkSyncWorkerStatus() })
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+      worker: getCdkSyncWorkerStatus(),
+    })
+  }
+})
+
 // ─── Start ────────────────────────────────────────────────────────────────────
 httpServer.listen(config.port, () => {
+  // Boot the CDK sync worker after the HTTP listener is ready. The worker is
+  // gated on START_CDK_SYNC_WORKER=true so demos / local dev don't accidentally
+  // call live Fortellis.
+  startCdkSyncWorker()
   console.log(`
 ╔══════════════════════════════════════════════════════╗
 ║          PitLane Voice — AI Telephony Service         ║
@@ -235,6 +263,7 @@ httpServer.listen(config.port, () => {
 ║    GET  /calls/history                               ║
 ║    POST /events/call-completed                       ║
 ║    POST /demo/simulate-inbound                       ║
+║    POST /cdk/drain          (force sync worker tick) ║
 ╚══════════════════════════════════════���═══════════════╝
   `)
 })
