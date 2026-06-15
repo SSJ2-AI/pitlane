@@ -16,6 +16,7 @@ import {
 } from '../lib/supabase'
 import { dispatchSms, type SmsMessageType } from '../lib/sms'
 import { resolveDealerForCall } from '../lib/dealer'
+import { isFortellisLive, lookupByPhoneViaFortellis } from '../cdk/fortellis'
 
 const router = Router()
 
@@ -68,7 +69,18 @@ router.post('/customer-lookup', (req: Request, res: Response): void => {
 
   // Check for demo override (for testing with different mock CDK customers)
   const overrideId = checkOverride(phone)
-  const customer = overrideId ? lookupById(overrideId) : await lookupByPhoneWithCDK(phone)
+  let customer
+  if (overrideId) {
+    customer = lookupById(overrideId)
+  } else if (isFortellisLive()) {
+    // Phase 3: voice-side Fortellis lookup. Resolve dealer from the in-
+    // progress call_logs row (set by pre-call) so the OAuth call uses the
+    // right dealer's credentials.
+    const dealer = await resolveDealerForCall(callId)
+    customer = await lookupByPhoneViaFortellis(phone, dealer.id)
+  } else {
+    customer = await lookupByPhoneWithCDK(phone)
+  }
 
   if (!customer) {
     startInboundCall({ callId, phone, customer: null })
@@ -861,7 +873,15 @@ function handleCheckROStatus(
 
 async function handleCustomerLookup(phone: string, callId: string, res: Response): Promise<Response> {
   const overrideId = checkOverride(phone)
-  const customer = overrideId ? lookupById(overrideId) : lookupByPhone(phone)
+  let customer
+  if (overrideId) {
+    customer = lookupById(overrideId)
+  } else if (isFortellisLive()) {
+    const dealer = await resolveDealerForCall(callId)
+    customer = await lookupByPhoneViaFortellis(phone, dealer.id)
+  } else {
+    customer = lookupByPhone(phone)
+  }
 
   if (!customer) {
     startInboundCall({ callId, phone, customer: null })

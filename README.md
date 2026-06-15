@@ -84,6 +84,71 @@ key which *bypasses RLS*, so today's writes/reads aren't constrained by
 the policy — the policy is the safety net for any future caller that
 uses an anon or per-user JWT key.
 
+## CDK write-back (Phase 3)
+
+Aria's mid-call decisions (appointments booked, upsells flagged,
+notes captured) flow back to CDK via the **Fortellis CDK Service
+Bundle** APIs. Two pieces:
+
+### Voice-side Fortellis client (`voice/src/cdk/fortellis.ts`)
+
+Per-dealer OAuth 2.0 `client_credentials` token cache, decrypted at
+the OAuth handshake from `dealers.fortellis_client_secret` (envelope-
+encrypted at rest — see "Field-level encryption" below). Five methods:
+
+| Method | CDK Service Bundle | Purpose |
+|---|---|---|
+| `getCustomer(phone, dealer_id)` | Customer Information (c0e82268) | Phone → customer record |
+| `getVehicle(vin, dealer_id)` | Vehicles (5d1bfb8d) | VIN → vehicle + mileage |
+| `getOpCodes(make_code, dealer_id)` | OpCodes (59c792d7) | Service catalogue |
+| `createAppointment(appt, dealer_id)` | Service Appointments | Books an appointment, returns CDK appointment id |
+| `createRONote(ro_id, note, dealer_id)` | Repair Orders (63ca887a) | Attaches a note to an existing RO |
+
+All five fall back to realistic mock data from `MOCK_CUSTOMERS` when
+`USE_FORTELLIS_LIVE` is not `"true"`. Tokens cache per-dealer with
+60s-pre-expiry refresh; tokens evict on 401/403.
+
+### Sync worker (`voice/src/cdk/sync-worker.ts`)
+
+Background drain of `cdk_sync_queue` — the table Aria's tools write
+to whenever an appointment / upsell / RO note needs to land in CDK.
+
+- Polls every 30 s, batches up to 10 jobs per tick, single-process
+  by design.
+- Jobs claimed optimistically (`UPDATE … WHERE status='pending'`)
+  so a future horizontal-scale split is one row-lock away.
+- State machine: `pending → in_progress → synced` on success,
+  `→ pending (attempts++)` on transient fail, `→ dead_letter` after
+  3 failures.
+- Per-job handler:
+  - `appointment` → `createAppointment` → write `appointments.cdk_id`.
+  - `note` → `createRONote` (payload: `{ro_id, note}`).
+  - `upsell` → `createRONote` against the linked RO when the
+    payload includes `ro_id`; otherwise marked synced with a
+    "no actionable target" note (skipped — not retried).
+  - `loaner_request` → internal-only, marked synced immediately.
+
+Boot gated on `START_CDK_SYNC_WORKER=true` + Supabase configured.
+The worker logs its decision so misconfiguration is visible in the
+service log.
+
+### Admin endpoints
+
+| | |
+|---|---|
+| `GET /health` | `cdk_sync_worker: {running, last_tick_at, last_tick_result, live, poll_interval_ms}` |
+| `POST /cdk/drain` | Run a single tick on demand. Returns `{processed, errors, skipped, worker}`. Used by the dashboard's "force CDK sync" admin action. |
+
+### Re-enqueue a dead-letter row
+
+```sql
+update public.cdk_sync_queue
+   set status = 'pending', attempts = 0, last_error = null
+ where id = '<uuid>';
+```
+
+The next tick will pick it up automatically.
+
 ## Field-level encryption
 
 `dealers.fortellis_client_secret` is encrypted at rest with **AES-256-GCM**
@@ -261,7 +326,8 @@ All tools accept `call_id` (the ElevenLabs conversation id) so the resulting Sup
 | 4A | `/calls` page: list + filters (customer / outcome / date range), call detail drawer with transcript, AI summary, appointments booked, upsells flagged, loaner requests. Honors `?customer_id=…` deep links from the dashboard. | ✅ |
 | 4B | `/service-desk` page: today's arrivals, loaner queue with Approve/Decline actions, upsell pipeline with Accepted/Declined actions, live 15 s auto-refresh. | ✅ this PR |
 | 4C | Customer-profile enhancements: `WarrantyBadge` (live from `/tools/warranty`) with status + factory/CPO expiry + recall list; `CustomerUpsellsPanel` reading from Supabase; "Open full call log" deep link. | ✅ |
-| 5 | SMS layer: Twilio dispatcher + 7 templates + sms_log/sms_consent schema + auto-confirmation on book-appointment + `POST /tools/send-sms` Aria tool + `POST /sms/send` generic. Observable `/health` build-stamp. | ✅ this PR |
+| 5 | SMS layer: Twilio dispatcher + 7 templates + sms_log/sms_consent schema + auto-confirmation on book-appointment + `POST /tools/send-sms` Aria tool + `POST /sms/send` generic. Observable `/health` build-stamp. | ✅ |
+| 3 (new) | CDK write-back via Fortellis: 5-method voice-side client, per-dealer OAuth + token cache + decrypted creds, sync worker draining `cdk_sync_queue` every 30s with 3-retry-then-dead-letter, `/cdk/drain` admin endpoint, customer-lookup prefers live Fortellis when `USE_FORTELLIS_LIVE=true`. | ✅ this PR |
 | 6 | Full CDK data pull (closed ROs, technicians, parts, loaner fleet, capacity) hourly into Supabase for analytics. | ⏭ next |
 | 7 | `/analytics` page — service manager BI: revenue, fill rate, upsell conversion, retention, AI weekly insights. | ⏭ |
 | 8 | Proactive outreach: service-interval reminders, recall follow-up, warranty expiry, declined-upsell re-engagement, weekly revenue-opportunity email. | ⏭ |
@@ -347,6 +413,32 @@ FORTELLIS_ENCRYPTION_KEY=<>
 # by you so IT can verify the data-at-rest anchor without dashboard
 # access.
 SUPABASE_REGION=ca-central-1
+
+# ─── Phase 3: CDK write-back via Fortellis ───────────────────────────
+# Two independent toggles:
+#   USE_FORTELLIS_LIVE=true       -> tools/lookups call real Fortellis
+#                                   (otherwise: mock data from
+#                                    MOCK_CUSTOMERS, no network calls)
+#   START_CDK_SYNC_WORKER=true    -> the 30s drain worker that polls
+#                                   cdk_sync_queue starts at boot.
+#                                   Refuses to start when Supabase is
+#                                   not configured.
+# Set both true in production. Set both false (or unset) in demos.
+USE_FORTELLIS_LIVE=false
+START_CDK_SYNC_WORKER=false
+
+# Per-dealer Fortellis credentials live in the dealers table
+# (fortellis_client_id, fortellis_client_secret encrypted via 0003 +
+# secrets.ts envelope encryption, fortellis_subscription_id). The
+# legacy single-dealer env-var path (FORTELLIS_CLIENT_ID/SECRET) is
+# the fallback when dealers row has no creds. Override the API
+# endpoints if your CDK Service Bundle uses different paths:
+# FORTELLIS_TOKEN_URL=https://identity.fortellis.io/oauth2/aus1p1ixy7YL8cMq02p7/v1/token
+# FORTELLIS_CUSTOMER_API_URL=https://api.fortellis.io/cdkservices/customer-information/v1/customers
+# FORTELLIS_VEHICLE_API_URL=https://api.fortellis.io/cdkservices/vehicle-information/v1/vehicles
+# FORTELLIS_RO_NOTE_API_URL=https://api.fortellis.io/cdkservices/repair-orders/v1/repair-orders
+# FORTELLIS_APPOINTMENT_API_URL=https://api.fortellis.io/cdkservices/service-appointments/v1/appointments
+# FORTELLIS_OPCODES_API_URL=https://api.fortellis.io/cdkservices/op-codes/v1/op-codes
 
 # ─── Phase 2A: Post-call intelligence ─────────────────────────────────
 # When OPENAI_API_KEY is set, /webhook/post-call uses GPT-4o-mini to

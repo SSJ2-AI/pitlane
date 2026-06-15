@@ -10,6 +10,7 @@ import { upsertCallLog, isSupabaseConfigured } from '../lib/supabase'
 import { processPostCall, normaliseStatus } from '../lib/postCallProcessor'
 import type { TranscriptTurn } from '../lib/summarizer'
 import { getDealerByPhone, type Dealer } from '../lib/dealer'
+import { isFortellisLive, lookupByPhoneViaFortellis } from '../cdk/fortellis'
 
 const router = Router()
 
@@ -212,7 +213,18 @@ router.post('/pre-call', async (req: RawBodyRequest, res: Response): Promise<Res
   try {
     if (phone) {
       const overrideId = checkOverride(phone)
-      customer = overrideId ? lookupById(overrideId) : await lookupByPhoneWithCDK(phone)
+      if (overrideId) {
+        customer = lookupById(overrideId)
+      } else if (isFortellisLive()) {
+        // Phase 3: live CDK lookup via voice-side Fortellis. Falls through
+        // to mock data when CDK returns no record (handled inside the
+        // helper).
+        customer = await lookupByPhoneViaFortellis(phone, dealer.id)
+      } else {
+        // Legacy path: dashboard's /api/voice/customer-lookup wrapper +
+        // in-memory mock fallback.
+        customer = await lookupByPhoneWithCDK(phone)
+      }
     }
   } catch (err) {
     console.error('[Webhook] customer lookup failed:', err instanceof Error ? err.message : err)
