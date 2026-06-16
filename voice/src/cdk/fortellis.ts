@@ -28,13 +28,22 @@ import { MOCK_CUSTOMERS, lookupByPhone } from '../mock/customers'
 //   OpCodes:         59c792d7
 
 // ─── Configuration ──────────────────────────────────────────────────────────
+//
+// Default Proxy URLs match the CDK Drive RO Bundle as documented on the
+// Fortellis API Docs portal (apidocs.fortellis.io). Every URL is
+// overridable via env var so dealers on a non-standard subscription can
+// repoint without a code change.
+//
+// IMPORTANT: there is no Service Appointments API in the CDK Drive RO
+// Bundle. createAppointment() stays mock-only until a separate Fortellis
+// Appointments subscription is provisioned (see TASK 6 below).
 
 const DEFAULT_TOKEN_URL = 'https://identity.fortellis.io/oauth2/aus1p1ixy7YL8cMq02p7/v1/token'
-const DEFAULT_CUSTOMER_API_URL = 'https://api.fortellis.io/cdkservices/customer-information/v1/customers'
-const DEFAULT_VEHICLE_API_URL = 'https://api.fortellis.io/cdkservices/vehicle-information/v1/vehicles'
-const DEFAULT_RO_NOTE_API_URL = 'https://api.fortellis.io/cdkservices/repair-orders/v1/repair-orders'
-const DEFAULT_APPOINTMENT_API_URL = 'https://api.fortellis.io/cdkservices/service-appointments/v1/appointments'
-const DEFAULT_OPCODES_API_URL = 'https://api.fortellis.io/cdkservices/op-codes/v1/op-codes'
+const DEFAULT_CUSTOMER_API_URL = 'https://api.fortellis.io/cdkdrive/crm/v1/customers'
+const DEFAULT_VEHICLE_API_URL = 'https://api.fortellis.io/cdkdrive/service/v1/vehicles'
+const DEFAULT_RO_API_URL = 'https://api.fortellis.io/service/cdk-drive/v2/repair-orders'
+const DEFAULT_OPCODES_API_URL = 'https://api.fortellis.io/cdkdrive/service/catalog/v1/opcodes'
+const DEFAULT_WORKSHOP_API_URL = 'https://api.fortellis.io/service/cdk-drive/v1/workshop-management'
 
 const REQUEST_TIMEOUT_MS = 8_000
 const TOKEN_REFRESH_EARLY_MS = 60_000
@@ -117,6 +126,13 @@ interface FortellisFetchOptions {
     url: string
     query?: Record<string, string | number | undefined | null>
     body?: Record<string, unknown>
+    /**
+     * If-Match header value for endpoints that require optimistic concurrency
+     * control (e.g. Update RO). Use '*' as a wildcard when the caller doesn't
+     * have the row's current ETag — fine for "always overwrite" scenarios
+     * like appending a note.
+     */
+    etag?: string
 }
 
 async function fortellisFetch<T>(dealer: Dealer, opts: FortellisFetchOptions): Promise<T> {
@@ -140,6 +156,7 @@ async function fortellisFetch<T>(dealer: Dealer, opts: FortellisFetchOptions): P
             'Subscription-Id': subscriptionId,
             'Accept': 'application/json',
             ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
+            ...(opts.etag ? { 'If-Match': opts.etag } : {}),
         },
         body: opts.body ? JSON.stringify(opts.body) : undefined,
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -188,7 +205,6 @@ export interface FortellisVehicle {
     year?: number
     make?: string
     model?: string
-    trim?: string
     color?: string
     mileage?: number
     license_plate?: string
@@ -229,6 +245,55 @@ export interface FortellisRONoteResult {
 
 async function loadDealer(dealerId: string): Promise<Dealer> {
     return getDealerById(dealerId)
+}
+
+// ─── 6. getServiceAdvisors (Workshop Management API) ────────────────────────
+//
+// Returns the list of active service advisors for a dealership. Used by the
+// dashboard's advisor-assignment dropdowns + by Aria when booking an
+// appointment so the advisor field is populated with a real CDK user id
+// instead of a free-form string.
+//
+// Live: GET {DEFAULT_WORKSHOP_API_URL}/service-advisors
+// Mock: a small static list — enough to drive UI dropdowns and the demo flow.
+
+export interface FortellisServiceAdvisor {
+    serviceAdvisorId: string
+    name: string
+    source: 'fortellis' | 'mock'
+}
+
+export async function getServiceAdvisors(dealerId: string): Promise<FortellisServiceAdvisor[]> {
+    if (!isFortellisLive()) {
+        return [
+            { serviceAdvisorId: 'SA-001', name: 'Michael Chen', source: 'mock' },
+            { serviceAdvisorId: 'SA-002', name: 'Sarah Thompson', source: 'mock' },
+        ]
+    }
+
+    const dealer = await loadDealer(dealerId)
+    const baseUrl = endpoint('FORTELLIS_WORKSHOP_API_URL', DEFAULT_WORKSHOP_API_URL)
+    const url = `${baseUrl}/service-advisors`
+
+    // CDK Drive Workshop Management v1 response shape:
+    //   { items: [{ serviceAdvisorId, name }] }
+    const payload = await fortellisFetch<{ items?: Array<Record<string, unknown>> }>(dealer, {
+        method: 'GET',
+        url,
+    })
+
+    const list = Array.isArray(payload.items) ? payload.items : []
+    return list
+        .map((raw): FortellisServiceAdvisor | null => {
+            const id = raw.serviceAdvisorId ?? raw.id
+            if (typeof id !== 'string' || id.length === 0) return null
+            return {
+                serviceAdvisorId: id,
+                name: typeof raw.name === 'string' ? raw.name : '',
+                source: 'fortellis',
+            }
+        })
+        .filter((sa): sa is FortellisServiceAdvisor => Boolean(sa))
 }
 
 // ─── Customer-lookup integration with the existing Customer type ────────────
@@ -297,6 +362,24 @@ export async function lookupByPhoneViaFortellis(
 
 // ─── 1. createRONote ────────────────────────────────────────────────────────
 
+/**
+ * Append a note to an existing repair order.
+ *
+ * The CDK Drive RO Bundle has NO dedicated /notes endpoint. Notes are
+ * persisted by calling Update RO with a `comments` field:
+ *
+ *   POST /repair-orders/{roId}/
+ *   If-Match: <etag>   (or '*' to overwrite without optimistic concurrency)
+ *   { "comments": "..." }
+ *
+ * We pass '*' as the If-Match wildcard until we wire ETag round-tripping
+ * end-to-end (read the RO first, capture its ETag, then write back). The
+ * wildcard is safe for this use case because we're append-only — we never
+ * overwrite anything we'd lose by skipping the concurrency check.
+ *
+ * The Update RO endpoint returns the updated RO, not a note record, so
+ * we synthesize a stable-enough note_id for the caller's audit trail.
+ */
 export async function createRONote(
     roId: string,
     note: string,
@@ -312,21 +395,20 @@ export async function createRONote(
     }
 
     const dealer = await loadDealer(dealerId)
-    const baseUrl = endpoint('FORTELLIS_RO_NOTE_API_URL', DEFAULT_RO_NOTE_API_URL)
-    const url = `${baseUrl}/${encodeURIComponent(roId)}/notes`
+    const baseUrl = endpoint('FORTELLIS_RO_API_URL', DEFAULT_RO_API_URL)
+    const url = `${baseUrl}/${encodeURIComponent(roId)}/`
 
-    const payload = await fortellisFetch<{ note_id?: string; id?: string }>(dealer, {
+    await fortellisFetch<Record<string, unknown>>(dealer, {
         method: 'POST',
         url,
+        etag: '*',
         body: {
-            note_text: note,
-            created_at: new Date().toISOString(),
-            source: 'aria',
+            comments: note,
         },
     })
 
     return {
-        note_id: String(payload.note_id ?? payload.id ?? `cdk-${Date.now()}`),
+        note_id: `cdk-note-${Date.now().toString(36)}`,
         ro_id: roId,
         source: 'fortellis',
     }
@@ -334,49 +416,40 @@ export async function createRONote(
 
 // ─── 2. createAppointment ───────────────────────────────────────────────────
 
+/**
+ * Create a service appointment in CDK.
+ *
+ * NOTE: CDK Drive RO Bundle has NO Service Appointments API. This stays
+ * mock-only until a separate Fortellis Appointments subscription is
+ * obtained. Returning a synthetic CDK id keeps the downstream sync-worker
+ * + appointments.cdk_id flow working end-to-end against mock data, so the
+ * day a real Appointments API lands we only have to swap the live branch
+ * back in.
+ *
+ * When USE_FORTELLIS_LIVE=true we still return mock data but log a
+ * one-line warning so the bundle gap is visible in the service logs (not
+ * silently masquerading as a real CDK write).
+ */
 export async function createAppointment(
     appt: AppointmentPayload,
-    dealerId: string,
+    _dealerId: string,
 ): Promise<FortellisAppointmentResult> {
-    if (!isFortellisLive()) {
-        console.log(
-            `[Fortellis][mock] createAppointment customer=${appt.customer_id} vehicle=${appt.vehicle_id} ` +
-            `service=${appt.service_type} date=${appt.date} time=${appt.time}`,
+    if (isFortellisLive()) {
+        console.warn(
+            '[Fortellis] createAppointment: CDK Drive RO Bundle has no Appointments API — ' +
+            'returning mock data. Subscribe to a Fortellis Appointments solution to enable live booking.',
         )
-        return {
-            appointment_cdk_id: `mock-appt-${Date.now().toString(36).toUpperCase()}`,
-            confirmation_number: `APT-${Date.now().toString(36).toUpperCase()}`,
-            source: 'mock',
-        }
     }
 
-    const dealer = await loadDealer(dealerId)
-    const url = endpoint('FORTELLIS_APPOINTMENT_API_URL', DEFAULT_APPOINTMENT_API_URL)
-
-    const payload = await fortellisFetch<{ id?: string; appointment_id?: string; confirmation_number?: string }>(
-        dealer,
-        {
-            method: 'POST',
-            url,
-            body: {
-                customer_id: appt.customer_id,
-                vehicle_id: appt.vehicle_id,
-                scheduled_date: appt.date,
-                scheduled_time: appt.time,
-                service_type: appt.service_type,
-                advisor: appt.advisor,
-                duration_hours: appt.duration_est_hours,
-                notes: appt.notes,
-                op_codes: appt.op_codes,
-                source: 'pitlane',
-            },
-        },
+    console.log(
+        `[Fortellis][mock] createAppointment customer=${appt.customer_id} vehicle=${appt.vehicle_id} ` +
+        `service=${appt.service_type} date=${appt.date} time=${appt.time}`,
     )
 
     return {
-        appointment_cdk_id: String(payload.appointment_id ?? payload.id ?? `cdk-${Date.now()}`),
-        confirmation_number: payload.confirmation_number,
-        source: 'fortellis',
+        appointment_cdk_id: `mock-appt-${Date.now().toString(36).toUpperCase()}`,
+        confirmation_number: `APT-${Date.now().toString(36).toUpperCase()}`,
+        source: 'mock',
     }
 }
 
@@ -403,37 +476,36 @@ export async function getCustomer(phone: string, dealerId: string): Promise<Fort
     const dealer = await loadDealer(dealerId)
     const baseUrl = endpoint('FORTELLIS_CUSTOMER_API_URL', DEFAULT_CUSTOMER_API_URL)
 
-    const payload = await fortellisFetch<{
-        customers?: Array<Record<string, unknown>>
-        customer_id?: string
-        id?: string
-        firstName?: string
-        lastName?: string
-    }>(dealer, {
+    // CDK Drive CRM v1 Customers response shape:
+    //   { items: [{ customerId, name: { first, last },
+    //               contactMethods: { primaryPhone, email1 },
+    //               postalAddress: { … } }] }
+    const payload = await fortellisFetch<{ items?: Array<Record<string, unknown>> }>(dealer, {
         method: 'GET',
         url: baseUrl,
         query: { phone },
     })
 
-    const list = Array.isArray(payload.customers)
-        ? payload.customers
-        : payload.customer_id || payload.id
-        ? [payload as unknown as Record<string, unknown>]
-        : []
-
+    const list = Array.isArray(payload.items) ? payload.items : []
     if (list.length === 0) return null
     const c = list[0]
 
-    const id = (c.customer_id ?? c.id ?? c.contactId) as string | undefined
+    const id = (c.customerId ?? c.id) as string | undefined
     if (!id) return null
+
+    const name = (c.name as { first?: string; last?: string } | undefined) ?? {}
+    const contact = (c.contactMethods as { primaryPhone?: string; email1?: string } | undefined) ?? {}
 
     return {
         customer_id: String(id),
-        first_name: String(c.firstName ?? c.first_name ?? c.givenName ?? '').trim(),
-        last_name: String(c.lastName ?? c.last_name ?? c.familyName ?? '').trim(),
-        phone: typeof c.phone === 'string' ? c.phone : undefined,
-        email: typeof c.email === 'string' ? c.email : undefined,
-        loyalty_tier: typeof c.loyaltyTier === 'string' ? c.loyaltyTier : undefined,
+        first_name: (name.first ?? '').trim(),
+        last_name: (name.last ?? '').trim(),
+        phone: typeof contact.primaryPhone === 'string' ? contact.primaryPhone : undefined,
+        email: typeof contact.email1 === 'string' ? contact.email1 : undefined,
+        // CDK Drive CRM v1 does not surface a "loyalty tier" — those live in
+        // the dealership's CRM CDP, not the customer record. Left undefined
+        // here; downstream code may enrich from a separate source.
+        loyalty_tier: undefined,
         notes: typeof c.advisorNotes === 'string' ? c.advisorNotes
             : typeof c.notes === 'string' ? c.notes
             : undefined,
@@ -460,22 +532,32 @@ export async function getOpCodes(makeCode: string, dealerId: string): Promise<Fo
     const dealer = await loadDealer(dealerId)
     const url = endpoint('FORTELLIS_OPCODES_API_URL', DEFAULT_OPCODES_API_URL)
 
-    const payload = await fortellisFetch<{ op_codes?: Array<Record<string, unknown>>; items?: Array<Record<string, unknown>> }>(
-        dealer,
-        {
-            method: 'GET',
-            url,
-            query: { make: makeCode },
-        },
-    )
+    // CDK Drive Service Catalog v1 OpCodes API supports query params:
+    //   desc   — fuzzy match against the op-code description
+    //   page   — pagination (defaults to 1)
+    //   pageSize — page size (defaults to API-side default)
+    // There is NO 'make' query parameter; the caller's makeCode is passed
+    // through to `desc` for description-substring matching.
+    //
+    // Response shape:
+    //   { items: [{ opCode, description, flatHours, flatSellRate,
+    //               estimatedDuration }] }
+    const payload = await fortellisFetch<{ items?: Array<Record<string, unknown>> }>(dealer, {
+        method: 'GET',
+        url,
+        query: { desc: makeCode },
+    })
 
-    const list = payload.op_codes ?? payload.items ?? []
+    const list = Array.isArray(payload.items) ? payload.items : []
     return list.map((raw): FortellisOpCode => ({
-        op_code: String(raw.op_code ?? raw.code ?? raw.id ?? ''),
-        description: String(raw.description ?? raw.label ?? ''),
-        labor_hours: typeof raw.labor_hours === 'number' ? raw.labor_hours : undefined,
-        flat_rate_total: typeof raw.flat_rate_total === 'number' ? raw.flat_rate_total : undefined,
-        parts_total: typeof raw.parts_total === 'number' ? raw.parts_total : undefined,
+        op_code: String(raw.opCode ?? ''),
+        description: String(raw.description ?? ''),
+        labor_hours: typeof raw.flatHours === 'number' ? raw.flatHours : undefined,
+        flat_rate_total: typeof raw.flatSellRate === 'number' ? raw.flatSellRate : undefined,
+        // Parts total is not part of the CDK Drive Service Catalog v1 OpCode
+        // schema — leave undefined; estimate is provided by `estimatedDuration`
+        // for ops that need it, but not surfaced here yet.
+        parts_total: undefined,
     })).filter((oc) => oc.op_code.length > 0)
 }
 
@@ -494,7 +576,6 @@ export async function getVehicle(vin: string, dealerId: string): Promise<Fortell
                     year: v.year,
                     make: v.make,
                     model: v.model,
-                    trim: v.trim,
                     color: v.color,
                     mileage: v.mileage,
                     license_plate: v.licensePlate,
@@ -508,36 +589,39 @@ export async function getVehicle(vin: string, dealerId: string): Promise<Fortell
     const dealer = await loadDealer(dealerId)
     const baseUrl = endpoint('FORTELLIS_VEHICLE_API_URL', DEFAULT_VEHICLE_API_URL)
 
-    const payload = await fortellisFetch<{
-        vehicles?: Array<Record<string, unknown>>
-        vehicle_id?: string
-        id?: string
-    }>(dealer, {
+    // CDK Drive Service v1 Vehicles response shape:
+    //   { items: [{ vehicleId,
+    //               identification: { vin, licensePlateNum },
+    //               specification: { make, model, modelYear },
+    //               mileage: { value, units },
+    //               exteriorColor }] }
+    const payload = await fortellisFetch<{ items?: Array<Record<string, unknown>> }>(dealer, {
         method: 'GET',
         url: baseUrl,
         query: { vin },
     })
 
-    const list = Array.isArray(payload.vehicles)
-        ? payload.vehicles
-        : payload.vehicle_id || payload.id
-        ? [payload as unknown as Record<string, unknown>]
-        : []
-
+    const list = Array.isArray(payload.items) ? payload.items : []
     if (list.length === 0) return null
+
     const v = list[0]
-    const id = (v.vehicle_id ?? v.id ?? v.VIN ?? vin) as string
+    const ident = (v.identification as { vin?: string; licensePlateNum?: string } | undefined) ?? {}
+    const spec = (v.specification as { make?: string; model?: string; modelYear?: number | string } | undefined) ?? {}
+    const mileage = (v.mileage as { value?: number; units?: string } | undefined) ?? {}
+
+    const id = (v.vehicleId ?? ident.vin ?? vin) as string
 
     return {
         vehicle_id: String(id),
-        vin: typeof v.vin === 'string' ? v.vin : vin,
-        year: typeof v.year === 'number' ? v.year : Number(v.year) || undefined,
-        make: typeof v.make === 'string' ? v.make : undefined,
-        model: typeof v.model === 'string' ? v.model : undefined,
-        trim: typeof v.trim === 'string' ? v.trim : undefined,
-        color: typeof v.color === 'string' ? v.color : typeof v.exteriorColor === 'string' ? v.exteriorColor : undefined,
-        mileage: typeof v.currentMileage === 'number' ? v.currentMileage : typeof v.mileage === 'number' ? v.mileage : undefined,
-        license_plate: typeof v.licensePlate === 'string' ? v.licensePlate : undefined,
+        vin: typeof ident.vin === 'string' ? ident.vin : vin,
+        year: typeof spec.modelYear === 'number'
+            ? spec.modelYear
+            : (Number(spec.modelYear) || undefined),
+        make: typeof spec.make === 'string' ? spec.make : undefined,
+        model: typeof spec.model === 'string' ? spec.model : undefined,
+        color: typeof v.exteriorColor === 'string' ? v.exteriorColor : undefined,
+        mileage: typeof mileage.value === 'number' ? mileage.value : undefined,
+        license_plate: typeof ident.licensePlateNum === 'string' ? ident.licensePlateNum : undefined,
         source: 'fortellis',
     }
 }

@@ -1,6 +1,6 @@
 {
   "name": "pitlane-voice",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "AI telephony microservice for PitLane — ElevenLabs + CDK/Fortellis integration",
   "main": "dist/server.js",
   "scripts": {
@@ -10,7 +10,8 @@
     "lint": "tsc --noEmit",
     "encrypt-secrets": "npm run build && node dist/scripts/encrypt-fortellis-secrets.js",
     "encrypt-secrets:selftest": "npm run build && node dist/scripts/encrypt-fortellis-secrets.js --selftest",
-    "encrypt-secrets:dry-run": "npm run build && node dist/scripts/encrypt-fortellis-secrets.js --dry-run"
+    "encrypt-secrets:dry-run": "npm run build && node dist/scripts/encrypt-fortellis-secrets.js --dry-run",
+    "smoke:fortellis": "npm run build && node dist/scripts/smoke-fortellis.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.108.1",
