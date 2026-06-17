@@ -265,6 +265,7 @@ Railway service hasn't picked up the latest main. Fix:
 | `/dashboard` | Service-advisor view per customer: profile, vehicles, recalls, service history, **warranty badge**, **upsells offered for this customer**, Aria call activity (filtered + all), outbound call dropdown, screen-pop with live caller. |
 | `/calls` | Aria call log: list + filters (customer / outcome / date range), detail drawer with transcript, AI summary, appointments booked, upsells flagged, loaner requests. Deep-linkable via `?customer_id=…`. |
 | `/service-desk` | Live operations queue: today's arrivals, loaner queue with Approve/Decline, upsell pipeline with Accepted/Declined. 15 s auto-refresh. |
+| `/vehicles/[id]` | Per-vehicle detail page: header card (year/make/model/VIN/mileage/color/plate, "Live CDK" vs "Mock" badge), next-service prediction card (8,000 km / 6 mo oil rule with progress bar), open recalls section (consequence + remedy + "Remedy Available" / "Remedy Pending" badge), service-history timeline (last 10 ROs from Supabase appointments+upsells when available, mock fixture otherwise). Reachable from `/calls` via the "View vehicle" link on each appointment + upsell card. |
 
 ## Aria tools (mid-call webhooks)
 
@@ -323,9 +324,10 @@ All tools accept `call_id` (the ElevenLabs conversation id) so the resulting Sup
 | 2A | `POST /webhook/post-call`: GPT-4o-mini summary (outcome, topics, upsells, action items, sentiment, loaner_needed) + Supabase persistence + loaner queue auto-insert. | ✅ this PR |
 | 2C | Supabase migration: `call_logs`, `appointments`, `upsells`, `loaner_requests`, `cdk_sync_queue`. | ✅ this PR |
 | 2B | 5 new Aria tools (`book-appointment`, `log-upsell`, `request-loaner`, `repair-eta`, `warranty`) wired to Supabase + CDK sync queue. | ✅ this PR |
-| 4A | `/calls` page: list + filters (customer / outcome / date range), call detail drawer with transcript, AI summary, appointments booked, upsells flagged, loaner requests. Honors `?customer_id=…` deep links from the dashboard. | ✅ |
-| 4B | `/service-desk` page: today's arrivals, loaner queue with Approve/Decline actions, upsell pipeline with Accepted/Declined actions, live 15 s auto-refresh. | ✅ this PR |
-| 4C | Customer-profile enhancements: `WarrantyBadge` (live from `/tools/warranty`) with status + factory/CPO expiry + recall list; `CustomerUpsellsPanel` reading from Supabase; "Open full call log" deep link. | ✅ |
+| 4A | `/calls` page: list + filters (customer / outcome / date range), call detail drawer with transcript, AI summary, appointments booked, upsells flagged, loaner requests. Honors `?customer_id=…` deep links. | ✅ |
+| 4B | `/service-desk` page: today's arrivals, loaner queue with Approve/Decline, upsell pipeline with Accepted/Declined, 15 s auto-refresh. | ✅ |
+| 4C | Customer-profile enhancements: `WarrantyBadge` + `CustomerUpsellsPanel` + "Open full call log" deep link. | ✅ |
+| 4D | `/vehicles/[id]` timeline page: vehicle header, oil-change prediction (8,000 km / 6 mo), open recalls, last-10 service history (Supabase → mock fallback), "View vehicle" links from `/calls`. NHTSA recall integration is stubbed (`fetchOpenRecallsByVin`) — wires real recall API in Phase 6+. | ✅ this PR |
 | 5 | SMS layer: Twilio dispatcher + 7 templates + sms_log/sms_consent schema + auto-confirmation on book-appointment + `POST /tools/send-sms` Aria tool + `POST /sms/send` generic. Observable `/health` build-stamp. | ✅ |
 | 3 (new) | CDK write-back via Fortellis: 5-method voice-side client, per-dealer OAuth + token cache + decrypted creds, sync worker draining `cdk_sync_queue` every 30s with 3-retry-then-dead-letter, `/cdk/drain` admin endpoint, customer-lookup prefers live Fortellis when `USE_FORTELLIS_LIVE=true`. | ✅ this PR |
 | 6 | Full CDK data pull (closed ROs, technicians, parts, loaner fleet, capacity) hourly into Supabase for analytics. | ⏭ next |
