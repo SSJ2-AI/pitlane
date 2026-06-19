@@ -237,6 +237,40 @@ tool call required.
 `sms_consent` (opt-in/out). Apply with `supabase db push` or paste into
 the SQL editor.
 
+## Known runtime gotchas
+
+### Node 18 silently breaks Supabase writes (fixed v1.6.0)
+
+`@supabase/supabase-js` eagerly initialises a realtime client during
+`createClient()`. On Node.js < 21 there is no `globalThis.WebSocket`
+and that init throws — but our try/catch caught the throw silently,
+returning `null`, and every persistence call (`upsertCallLog`,
+`insertAppointment`, `insertUpsell`, `insertLoanerRequest`,
+`insertSmsLog`) was no-opping.
+
+Symptom: Aria confirms a booking on a call, you see the rendered
+"appointment confirmed" SMS, but nothing appears in Supabase.
+
+Fix shipped in `voice/src/lib/supabase.ts`:
+
+1. Polyfill `globalThis.WebSocket` from the `ws` package at module
+   load (before any `createClient` reads it).
+2. Pass `transport: WS` to the realtime config as belt-and-suspenders.
+
+Verify after deploy:
+
+```bash
+curl https://<voice-host>/health | jq '.runtime'
+# {
+#   "node_version": "v18.20.…",
+#   "websocket_polyfilled": true     ← key signal that the fix is live
+# }
+```
+
+On Node 21+ `websocket_polyfilled` is `false` (native WebSocket exists,
+polyfill skipped). Either value means writes will work; the flag exists
+so a single curl tells you which path is being taken.
+
 ## Deployment troubleshooting
 
 The voice service deploy on Railway runs from the `voice/` subdirectory
