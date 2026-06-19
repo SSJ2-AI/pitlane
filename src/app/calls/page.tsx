@@ -497,7 +497,17 @@ function CallDetailPanel({ detail }: { detail: CallDetailResponse }) {
                     <ul className="mt-3 space-y-2">
                         {appointments.map((appt) => (
                             <li key={appt.id} className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-sm text-emerald-100">
-                                <p className="font-bold">{appt.service_type}</p>
+                                <div className="flex flex-wrap items-start justify-between gap-3">
+                                    <p className="font-bold">{appt.service_type}</p>
+                                    {appt.vehicle_id && (
+                                        <Link
+                                            href={`/vehicles/${encodeURIComponent(appt.vehicle_id)}`}
+                                            className="rounded-full border border-emerald-400/50 bg-emerald-400/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] text-emerald-100 transition hover:border-emerald-200 hover:text-white"
+                                        >
+                                            View vehicle
+                                        </Link>
+                                    )}
+                                </div>
                                 <p className="text-xs text-emerald-200/80">
                                     {appt.date} at {appt.time}
                                     {appt.advisor ? ` · ${appt.advisor}` : ''}
@@ -523,7 +533,17 @@ function CallDetailPanel({ detail }: { detail: CallDetailResponse }) {
                                     <span className="font-black text-amber-200">{formatCurrency(u.value_est)}</span>
                                 </div>
                                 {u.description && <p className="mt-1 text-xs text-zinc-400">{u.description}</p>}
-                                <p className="mt-1 text-[10px] uppercase tracking-[0.22em] text-zinc-500">{u.status}</p>
+                                <div className="mt-1 flex items-center justify-between gap-2">
+                                    <p className="text-[10px] uppercase tracking-[0.22em] text-zinc-500">{u.status}</p>
+                                    {u.vehicle_id && (
+                                        <Link
+                                            href={`/vehicles/${encodeURIComponent(u.vehicle_id)}`}
+                                            className="rounded-full border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-300 transition hover:border-red-500 hover:text-white"
+                                        >
+                                            View vehicle
+                                        </Link>
+                                    )}
+                                </div>
                             </li>
                         ))}
                     </ul>
