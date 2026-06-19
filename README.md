@@ -94,19 +94,24 @@ Bundle** APIs. Two pieces:
 
 Per-dealer OAuth 2.0 `client_credentials` token cache, decrypted at
 the OAuth handshake from `dealers.fortellis_client_secret` (envelope-
-encrypted at rest — see "Field-level encryption" below). Five methods:
+encrypted at rest — see "Field-level encryption" below). Six methods,
+all backed by the **CDK Drive RO Bundle** unless noted:
 
-| Method | CDK Service Bundle | Purpose |
+| Method | Bundle / API | Purpose |
 |---|---|---|
-| `getCustomer(phone, dealer_id)` | Customer Information (c0e82268) | Phone → customer record |
-| `getVehicle(vin, dealer_id)` | Vehicles (5d1bfb8d) | VIN → vehicle + mileage |
-| `getOpCodes(make_code, dealer_id)` | OpCodes (59c792d7) | Service catalogue |
-| `createAppointment(appt, dealer_id)` | Service Appointments | Books an appointment, returns CDK appointment id |
-| `createRONote(ro_id, note, dealer_id)` | Repair Orders (63ca887a) | Attaches a note to an existing RO |
+| `getCustomer(phone, dealer_id)` | CRM v1 Customers (`c0e82268`) | Phone → customer. Parses `items[].customerId`, `name.{first,last}`, `contactMethods.{primaryPhone, email1}`. |
+| `getVehicle(vin, dealer_id)` | Service v1 Vehicles (`5d1bfb8d`) | VIN → vehicle. Parses `items[].vehicleId`, `identification.{vin, licensePlateNum}`, `specification.{make, model, modelYear}`, `mileage.value`. |
+| `getOpCodes(query, dealer_id)` | Service Catalog v1 OpCodes (`59c792d7`) | Fuzzy search over op-code descriptions via `desc` query param. Returns `items[].{opCode, description, flatHours, flatSellRate}`. No `make` param in this Bundle. |
+| `getServiceAdvisors(dealer_id)` | Workshop Management v1 (`ba0877f5`) | Returns `items[].{serviceAdvisorId, name}` for active advisors. |
+| `createRONote(ro_id, note, dealer_id)` | RO v2 (`63ca887a`) | Appends a note via **Update RO**: `POST /repair-orders/{roId}/` with `{comments}` body + `If-Match: *` header. There is no dedicated `/notes` endpoint in this Bundle. |
+| `createAppointment(appt, dealer_id)` | _(not in this Bundle)_ | **Mock-only.** CDK Drive RO Bundle has no Service Appointments API. Returns a synthetic `mock-appt-…` ID + logs a bundle-gap warning when `USE_FORTELLIS_LIVE=true`. Subscribe to a separate Fortellis Appointments solution to enable live booking. |
 
-All five fall back to realistic mock data from `MOCK_CUSTOMERS` when
-`USE_FORTELLIS_LIVE` is not `"true"`. Tokens cache per-dealer with
-60s-pre-expiry refresh; tokens evict on 401/403.
+All methods fall back to realistic mock data from `MOCK_CUSTOMERS`
+when `USE_FORTELLIS_LIVE` is not `"true"`. Tokens cache per-dealer
+with 60s-pre-expiry refresh; tokens evict on 401/403.
+
+Smoke-test the mock surface with `npm run smoke:fortellis` from
+`voice/`.
 
 ### Sync worker (`voice/src/cdk/sync-worker.ts`)
 
@@ -433,12 +438,17 @@ START_CDK_SYNC_WORKER=false
 # legacy single-dealer env-var path (FORTELLIS_CLIENT_ID/SECRET) is
 # the fallback when dealers row has no creds. Override the API
 # endpoints if your CDK Service Bundle uses different paths:
+# CDK Drive RO Bundle Proxy URLs (defaults shown):
 # FORTELLIS_TOKEN_URL=https://identity.fortellis.io/oauth2/aus1p1ixy7YL8cMq02p7/v1/token
-# FORTELLIS_CUSTOMER_API_URL=https://api.fortellis.io/cdkservices/customer-information/v1/customers
-# FORTELLIS_VEHICLE_API_URL=https://api.fortellis.io/cdkservices/vehicle-information/v1/vehicles
-# FORTELLIS_RO_NOTE_API_URL=https://api.fortellis.io/cdkservices/repair-orders/v1/repair-orders
-# FORTELLIS_APPOINTMENT_API_URL=https://api.fortellis.io/cdkservices/service-appointments/v1/appointments
-# FORTELLIS_OPCODES_API_URL=https://api.fortellis.io/cdkservices/op-codes/v1/op-codes
+# FORTELLIS_CUSTOMER_API_URL=https://api.fortellis.io/cdkdrive/crm/v1/customers
+# FORTELLIS_VEHICLE_API_URL=https://api.fortellis.io/cdkdrive/service/v1/vehicles
+# FORTELLIS_RO_API_URL=https://api.fortellis.io/service/cdk-drive/v2/repair-orders
+# FORTELLIS_OPCODES_API_URL=https://api.fortellis.io/cdkdrive/service/catalog/v1/opcodes
+# FORTELLIS_WORKSHOP_API_URL=https://api.fortellis.io/service/cdk-drive/v1/workshop-management
+#
+# Note: the CDK Drive RO Bundle has NO Service Appointments API.
+# createAppointment() stays mock-only until a separate Fortellis
+# Appointments subscription is added.
 
 # ─── Phase 2A: Post-call intelligence ─────────────────────────────────
 # When OPENAI_API_KEY is set, /webhook/post-call uses GPT-4o-mini to
