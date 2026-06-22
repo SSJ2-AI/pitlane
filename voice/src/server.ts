@@ -13,7 +13,7 @@ import { setGlobalNextCaller, setPhoneOverride, listOverrides } from './mock/ses
 import { MOCK_CUSTOMERS } from './mock/customers'
 import { DEFAULT_DEALER } from './lib/dealer'
 import { isEncryptionConfigured } from './lib/secrets'
-import { isSupabaseConfigured } from './lib/supabase'
+import { isSupabaseConfigured, isWebSocketPolyfilled } from './lib/supabase'
 import { isTwilioConfigured } from './lib/twilio'
 import { isFortellisLive } from './cdk/fortellis'
 import { getCdkSyncWorkerStatus, runCdkSyncTickOnce, startCdkSyncWorker } from './cdk/sync-worker'
@@ -90,6 +90,16 @@ app.get('/health', (_req, res) => {
       twilio: isTwilioConfigured(),
       field_encryption: isEncryptionConfigured(),
       fortellis_live: isFortellisLive(),
+    },
+    runtime: {
+      node_version: process.version,
+      // True when we polyfilled globalThis.WebSocket from `ws` at module
+      // load — supabase-js's realtime client requires globalThis.WebSocket
+      // and Node 18 doesn't have one natively. False means either Node 21+
+      // has its own, or the polyfill didn't run (which would be a bug —
+      // every write to call_logs / appointments / upsells / loaner_requests
+      // / sms_log would silently fail).
+      websocket_polyfilled: isWebSocketPolyfilled(),
     },
     cdk_sync_worker: getCdkSyncWorkerStatus(),
     default_dealer: {

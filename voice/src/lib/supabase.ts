@@ -1,3 +1,4 @@
+import WS from 'ws'
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 
 // ─── PitLane × Supabase client ───────────────────────────────────────────────
@@ -9,6 +10,32 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 // persistence layer no-ops and the demo flow keeps working with the in-memory
 // call store. This matches the pattern already used by lookupByPhoneWithCDK
 // and src/lib/fortellis.ts on the dashboard side.
+//
+// ─── Node WebSocket polyfill (Railway is on Node 18) ────────────────────────
+//
+// @supabase/supabase-js eagerly initialises its realtime client during
+// createClient(). On Node.js < 21 there is no `globalThis.WebSocket`, so
+// the realtime constructor throws — and our try/catch below was swallowing
+// the throw, returning a null client, and every persistence call was
+// silently no-opping (book_appointment, log_upsell, upsertCallLog, …).
+//
+// Fix: polyfill the global from the `ws` package (already a dep — used by
+// our screen-pop server) BEFORE createClient is reached. This runs at
+// module load so it covers every call site, including transitive imports.
+// We also pass `transport` to the realtime config as belt + suspenders
+// in case any future supabase-js version reaches for the option directly
+// rather than walking up to globalThis.
+
+let polyfilledWebsocket = false
+if (typeof (globalThis as { WebSocket?: unknown }).WebSocket === 'undefined') {
+  ;(globalThis as { WebSocket: unknown }).WebSocket = WS
+  polyfilledWebsocket = true
+  console.log('[Supabase] polyfilled globalThis.WebSocket from ws (Node.js < 21)')
+}
+
+export function isWebSocketPolyfilled(): boolean {
+  return polyfilledWebsocket
+}
 
 let cached: SupabaseClient | null = null
 let probed = false
@@ -48,6 +75,14 @@ export function getSupabase(): SupabaseClient | null {
     cached = createClient(url, key, {
       auth: { persistSession: false, autoRefreshToken: false },
       global: { headers: { 'x-pitlane-source': 'voice' } },
+      realtime: {
+        // Defensive: even with the globalThis.WebSocket polyfill above,
+        // some supabase-js versions reach for `transport` directly rather
+        // than walking up to globalThis. Cast through unknown because
+        // `ws`'s WebSocket type doesn't exactly match the lib-dom type
+        // realtime-js expects — they're shape-compatible at runtime.
+        transport: WS as unknown as never,
+      },
     })
     console.log('[Supabase] client initialised')
     return cached
