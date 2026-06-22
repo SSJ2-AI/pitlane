@@ -108,7 +108,8 @@ export async function GET(request: Request) {
     const limit = Math.min(parseInt(searchParams.get('limit') ?? '50', 10), 200);
     const offset = parseInt(searchParams.get('offset') ?? '0', 10);
 
-    let query = supabase.from('call_logs').select('*', { count: 'exact' }).eq('dealer_id', dealer.id).order('created_at', { ascending: false }).range(offset, offset + limit - 1);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let query: any = supabase.from('call_logs').select('*', { count: 'exact' }).eq('dealer_id', dealer.id).order('created_at', { ascending: false }).range(offset, offset + limit - 1);
     const outcome = searchParams.get('outcome');
     if (outcome) query = query.eq('outcome' as any, outcome);
     const since = searchParams.get('since');
