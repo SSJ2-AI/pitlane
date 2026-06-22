@@ -1,135 +1,283 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
+import type { CustomerListRow } from '@/app/api/customers/route';
 
-interface Customer {
-    id: string;
-    name: string;
-    phone: string;
-    email: string;
-    customerSince: number;
-    lifetimeVisits: number;
-    lifetimeSpend: number;
-    vehicles: { year: number; make: string; model: string; vin: string; }[];
-    lastService: string;
-    openRecalls: number;
+type LoyaltyTier = CustomerListRow['loyalty_tier'];
+
+const TIER_STYLES: Record<LoyaltyTier, string> = {
+    Bronze: 'border-orange-500/40 bg-orange-500/10 text-orange-200',
+    Silver: 'border-zinc-500/40 bg-zinc-500/10 text-zinc-200',
+    Gold: 'border-amber-500/40 bg-amber-500/10 text-amber-200',
+    Platinum: 'border-fuchsia-500/40 bg-fuchsia-500/10 text-fuchsia-200',
+};
+
+interface CustomersListResponse {
+    customers: CustomerListRow[];
+    total: number;
+    dealer: { id: string; name: string };
+    persistence: 'supabase' | 'mock';
 }
-
-const MOCK_CUSTOMERS: Customer[] = [
-    { id: 'cust_001', name: 'James Whitfield', phone: '647-555-0192', email: 'j.whitfield@gmail.com', customerSince: 2018, lifetimeVisits: 14, lifetimeSpend: 32850, vehicles: [{ year: 2021, make: 'Porsche', model: 'Cayenne S', vin: 'WP1AA2AY4MDA12345' }, { year: 2020, make: 'Porsche', model: '911 Carrera S', vin: 'WP0AA2A71LS200123' }], lastService: 'Nov 2025', openRecalls: 1 },
-    { id: 'cust_002', name: 'Sarah Park', phone: '416-555-0847', email: 'sarah.park@outlook.com', customerSince: 2021, lifetimeVisits: 8, lifetimeSpend: 14200, vehicles: [{ year: 2022, make: 'Porsche', model: 'Macan GTS', vin: 'WP0AA2A71LS200456' }], lastService: 'Mar 2026', openRecalls: 0 },
-    { id: 'cust_003', name: 'Michael Chen', phone: '905-555-0321', email: 'mchen@gmail.com', customerSince: 2020, lifetimeVisits: 11, lifetimeSpend: 28600, vehicles: [{ year: 2023, make: 'Porsche', model: '911 GT3', vin: 'WP0CA2985NS610087' }], lastService: 'Jan 2026', openRecalls: 0 },
-    { id: 'cust_004', name: 'Priya Nair', phone: '647-555-0411', email: 'p.nair@rogers.com', customerSince: 2022, lifetimeVisits: 5, lifetimeSpend: 9800, vehicles: [{ year: 2022, make: 'Porsche', model: 'Taycan', vin: 'WP0AB2A97NS123456' }], lastService: 'Apr 2026', openRecalls: 0 },
-    { id: 'cust_005', name: 'David Kowalski', phone: '416-555-0992', email: 'd.kowalski@hotmail.com', customerSince: 2019, lifetimeVisits: 18, lifetimeSpend: 41500, vehicles: [{ year: 2023, make: 'Porsche', model: 'Macan Turbo', vin: 'WP1AE2AY9NDA55789' }], lastService: 'Jun 2026', openRecalls: 0 },
-];
 
 function formatCurrency(n: number) {
     return new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD', maximumFractionDigits: 0 }).format(n);
 }
 
-export default function CustomersPage() {
-    const [customers, setCustomers] = useState<Customer[]>([]);
-    const [search, setSearch] = useState('');
-    const [loading, setLoading] = useState(true);
+function formatRelativeDate(iso: string | null) {
+    if (!iso) return '—';
+    try {
+        const date = new Date(iso);
+        const today = new Date();
+        const diffDays = Math.floor((today.getTime() - date.getTime()) / 86_400_000);
+        if (diffDays === 0) return 'Today';
+        if (diffDays === 1) return 'Yesterday';
+        if (diffDays < 7) return `${diffDays}d ago`;
+        if (diffDays < 30) return `${Math.floor(diffDays / 7)}w ago`;
+        return date.toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' });
+    } catch {
+        return iso;
+    }
+}
 
-    useEffect(() => {
-        // In mock mode, use MOCK_CUSTOMERS. In production, would call /api/customers
-        setTimeout(() => { setCustomers(MOCK_CUSTOMERS); setLoading(false); }, 400);
+const OUTCOME_STYLES: Record<string, string> = {
+    appointment_booked: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200',
+    upsell_flagged: 'border-amber-500/40 bg-amber-500/10 text-amber-200',
+    issue_reported: 'border-red-500/40 bg-red-500/10 text-red-200',
+    inquiry: 'border-sky-500/40 bg-sky-500/10 text-sky-200',
+    other: 'border-zinc-700 bg-zinc-950 text-zinc-300',
+};
+
+export default function CustomersPage() {
+    const [data, setData] = useState<CustomersListResponse | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [search, setSearch] = useState('');
+
+    const load = useCallback(async () => {
+        setLoading(true);
+        setError(null);
+        try {
+            const response = await fetch('/api/customers', { cache: 'no-store' });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const payload = (await response.json()) as CustomersListResponse;
+            setData(payload);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Failed to load customers');
+        } finally {
+            setLoading(false);
+        }
     }, []);
 
-    const filtered = customers.filter(c =>
-        !search || c.name.toLowerCase().includes(search.toLowerCase()) || c.phone.includes(search) || c.email.toLowerCase().includes(search.toLowerCase())
+    useEffect(() => {
+        void load();
+    }, [load]);
+
+    const filtered = useMemo(() => {
+        if (!data) return [];
+        const q = search.trim().toLowerCase();
+        if (!q) return data.customers;
+        return data.customers.filter(
+            (c) =>
+                c.name.toLowerCase().includes(q) ||
+                c.phone.includes(q) ||
+                c.email.toLowerCase().includes(q),
+        );
+    }, [data, search]);
+
+    const totalSpend = useMemo(
+        () => (data?.customers ?? []).reduce((sum, c) => sum + c.lifetime_spend, 0),
+        [data],
     );
 
     return (
         <main className="min-h-screen bg-[#09090b] text-zinc-100">
             <header className="sticky top-0 z-20 border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur">
-                <div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4 lg:px-8">
-                    <div className="flex items-center gap-3">
-                        <Link href="/dashboard" className="flex h-10 w-10 items-center justify-center rounded-xl border border-red-500/40 bg-red-600/15 text-sm font-black text-red-100">PL</Link>
+                <div className="mx-auto flex max-w-7xl flex-col gap-4 px-5 py-4 sm:flex-row sm:items-center sm:justify-between lg:px-8">
+                    <Link href="/dashboard" className="flex items-center gap-3">
+                        <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-red-500/40 bg-red-600/15 text-sm font-black text-red-100 shadow-lg shadow-red-950/30">PL</div>
                         <div>
                             <h1 className="text-2xl font-black tracking-tight text-white">Pit<span className="text-red-500">Lane</span></h1>
-                            <p className="text-xs uppercase tracking-[0.35em] text-zinc-500">Porsche service desk</p>
+                            <p className="text-xs uppercase tracking-[0.35em] text-zinc-500">Customer directory</p>
                         </div>
-                    </div>
-                    <nav className="flex items-center gap-2">
+                    </Link>
+                    <nav className="flex flex-wrap items-center gap-3">
                         <VoiceStatusDot />
-                        <Link href="/calls" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 hover:border-zinc-500 transition">Calls</Link>
-                        <Link href="/service-desk" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 hover:border-zinc-500 transition">Service desk</Link>
-                        <Link href="/customers" className="rounded-full border border-red-500/60 bg-red-600/15 px-4 py-2 text-sm font-semibold text-red-100">Customers</Link>
-                        <Link href="/dashboard" className="rounded-full border border-zinc-700 bg-red-600 px-4 py-2 text-sm font-bold text-white hover:bg-red-500 transition">Service Advisor</Link>
+                        <Link href="/dashboard" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Dashboard</Link>
+                        <Link href="/calls" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Calls</Link>
+                        <span className="inline-flex items-center rounded-full border border-red-500/40 bg-red-600/15 px-4 py-2 text-sm font-semibold text-red-200">Customers</span>
+                        <Link href="/service-desk" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Service desk</Link>
                     </nav>
                 </div>
             </header>
 
-            <div className="mx-auto max-w-7xl px-5 py-8 lg:px-8">
-                <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-                    <div>
-                        <p className="text-sm font-semibold uppercase tracking-[0.35em] text-zinc-500">Customer directory</p>
-                        <h2 className="mt-2 text-3xl font-black tracking-tight text-white">All customers</h2>
-                    </div>
-                    <input
-                        value={search} onChange={e => setSearch(e.target.value)}
-                        placeholder="Search by name, phone, or email…"
-                        className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-5 py-3 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-red-500 sm:max-w-xs"
+            <section className="mx-auto max-w-7xl px-5 py-8 lg:px-8">
+                <div className="mb-6 flex flex-col gap-2">
+                    <p className="text-sm font-semibold uppercase tracking-[0.4em] text-red-400">Directory</p>
+                    <h2 className="text-4xl font-black tracking-tight text-white sm:text-5xl">All customers</h2>
+                    <p className="max-w-3xl text-base leading-7 text-zinc-400">
+                        Every customer Aria can identify by phone. Click a row to see only their calls,
+                        or jump straight to their primary vehicle.
+                    </p>
+                </div>
+
+                <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                    <StatCard label="Total customers" value={data ? String(data.total) : '—'} />
+                    <StatCard
+                        label="Lifetime spend"
+                        value={data ? formatCurrency(totalSpend) : '—'}
+                        accent="emerald"
+                    />
+                    <StatCard
+                        label="Persistence"
+                        value={
+                            data?.persistence === 'supabase'
+                                ? 'Supabase + mock'
+                                : data?.persistence === 'mock'
+                                ? 'Mock only'
+                                : '—'
+                        }
+                        accent={data?.persistence === 'supabase' ? 'emerald' : undefined}
+                    />
+                    <StatCard
+                        label="Dealer"
+                        value={data ? data.dealer.name : '—'}
                     />
                 </div>
 
-                {loading ? (
+                <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <input
+                        value={search}
+                        onChange={(e) => setSearch(e.target.value)}
+                        placeholder="Search by name, phone, or email…"
+                        className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-5 py-3 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-red-500 sm:max-w-md"
+                    />
+                    <span className="rounded-full border border-zinc-700 bg-zinc-950 px-3 py-1 text-xs font-bold uppercase tracking-[0.18em] text-zinc-400">
+                        {filtered.length} of {data?.customers.length ?? 0} matching
+                    </span>
+                </div>
+
+                {error && (
+                    <div className="mb-6 rounded-2xl border border-red-500/40 bg-red-500/10 px-5 py-4 text-sm text-red-100">{error}</div>
+                )}
+
+                {loading && !data && (
                     <div className="space-y-3 animate-pulse">
-                        {[...Array(4)].map((_, i) => <div key={i} className="h-24 rounded-2xl border border-zinc-800 bg-zinc-900" />)}
-                    </div>
-                ) : (
-                    <div className="space-y-3">
-                        {filtered.map(c => (
-                            <Link key={c.id} href={`/dashboard?phone=${encodeURIComponent(c.phone)}`}
-                                className="flex flex-col gap-4 rounded-2xl border border-zinc-800 bg-zinc-900 p-5 transition hover:border-zinc-600 sm:flex-row sm:items-center sm:justify-between">
-                                <div className="flex-1 min-w-0">
-                                    <div className="flex flex-wrap items-center gap-3">
-                                        <span className="text-lg font-black text-white">{c.name}</span>
-                                        {c.openRecalls > 0 && (
-                                            <span className="rounded-full border border-red-500/50 bg-red-600/15 px-3 py-0.5 text-xs font-bold text-red-200">{c.openRecalls} open recall</span>
-                                        )}
-                                    </div>
-                                    <div className="mt-2 flex flex-wrap gap-3 text-sm text-zinc-400">
-                                        <span>{c.phone}</span>
-                                        <span className="text-zinc-600">·</span>
-                                        <span>{c.email}</span>
-                                        <span className="text-zinc-600">·</span>
-                                        <span>Customer since {c.customerSince}</span>
-                                    </div>
-                                    <div className="mt-2 flex flex-wrap gap-2">
-                                        {c.vehicles.map(v => (
-                                            <span key={v.vin} className="rounded-full border border-zinc-700 bg-zinc-950 px-3 py-1 text-xs text-zinc-300">{v.year} {v.model}</span>
-                                        ))}
-                                    </div>
-                                </div>
-                                <div className="flex shrink-0 gap-4 text-right sm:gap-6">
-                                    <div>
-                                        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-500">Visits</p>
-                                        <p className="mt-1 text-xl font-black text-white">{c.lifetimeVisits}</p>
-                                    </div>
-                                    <div>
-                                        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-500">Lifetime spend</p>
-                                        <p className="mt-1 text-xl font-black text-red-300">{formatCurrency(c.lifetimeSpend)}</p>
-                                    </div>
-                                    <div>
-                                        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-500">Last service</p>
-                                        <p className="mt-1 text-lg font-bold text-zinc-200">{c.lastService}</p>
-                                    </div>
-                                </div>
-                            </Link>
+                        {[0, 1, 2, 3].map((i) => (
+                            <div key={i} className="h-24 rounded-2xl border border-zinc-800 bg-zinc-900" />
                         ))}
-                        {filtered.length === 0 && (
-                            <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-10 text-center text-zinc-500">
-                                No customers match &quot;{search}&quot;
-                            </div>
-                        )}
                     </div>
                 )}
-            </div>
+
+                {data && (
+                    <div className="overflow-hidden rounded-3xl border border-zinc-800 bg-zinc-900">
+                        <table className="w-full text-left text-sm">
+                            <thead className="border-b border-zinc-800 bg-zinc-950/60 text-[10px] uppercase tracking-[0.22em] text-zinc-500">
+                                <tr>
+                                    <th className="px-4 py-3 font-semibold">Customer</th>
+                                    <th className="px-4 py-3 font-semibold">Phone</th>
+                                    <th className="px-4 py-3 font-semibold">Tier</th>
+                                    <th className="px-4 py-3 font-semibold">Vehicles</th>
+                                    <th className="px-4 py-3 font-semibold">Open ROs</th>
+                                    <th className="px-4 py-3 font-semibold">Last call</th>
+                                    <th className="px-4 py-3 text-right font-semibold">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {filtered.length === 0 ? (
+                                    <tr>
+                                        <td colSpan={7} className="px-4 py-10 text-center text-sm text-zinc-500">
+                                            {search ? `No customers match "${search}"` : 'No customers on file.'}
+                                        </td>
+                                    </tr>
+                                ) : (
+                                    filtered.map((c) => (
+                                        <tr
+                                            key={c.id}
+                                            className="border-b border-zinc-800/60 transition last:border-b-0 hover:bg-zinc-950/40"
+                                        >
+                                            <td className="px-4 py-4">
+                                                <Link
+                                                    href={`/customers/${encodeURIComponent(c.id)}`}
+                                                    className="block min-w-0"
+                                                >
+                                                    <p className="truncate text-sm font-black text-white transition hover:text-red-200">{c.name}</p>
+                                                    <p className="mt-0.5 truncate text-xs text-zinc-500">{c.email}</p>
+                                                </Link>
+                                            </td>
+                                            <td className="px-4 py-4 text-zinc-300">{c.phone}</td>
+                                            <td className="px-4 py-4">
+                                                <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] ${TIER_STYLES[c.loyalty_tier]}`}>
+                                                    {c.loyalty_tier}
+                                                </span>
+                                            </td>
+                                            <td className="px-4 py-4">
+                                                <span className="text-base font-black text-white">{c.vehicles.length}</span>
+                                                {c.vehicles.length > 0 && (
+                                                    <p className="mt-0.5 text-[11px] text-zinc-500">
+                                                        {c.vehicles
+                                                            .slice(0, 2)
+                                                            .map((v) => `${v.year} ${v.model}`)
+                                                            .join(', ')}
+                                                        {c.vehicles.length > 2 && ` +${c.vehicles.length - 2}`}
+                                                    </p>
+                                                )}
+                                            </td>
+                                            <td className="px-4 py-4">
+                                                <span className={`text-base font-black ${c.open_ros_count > 0 ? 'text-amber-300' : 'text-zinc-400'}`}>
+                                                    {c.open_ros_count}
+                                                </span>
+                                            </td>
+                                            <td className="px-4 py-4">
+                                                {c.last_call ? (
+                                                    <div className="flex flex-col gap-1">
+                                                        <span className="text-xs text-zinc-200">{formatRelativeDate(c.last_call.date)}</span>
+                                                        {c.last_call.outcome && (
+                                                            <span className={`w-fit rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] ${OUTCOME_STYLES[c.last_call.outcome] ?? OUTCOME_STYLES.other}`}>
+                                                                {c.last_call.outcome.replace(/_/g, ' ')}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                ) : (
+                                                    <span className="text-xs text-zinc-500">No calls yet</span>
+                                                )}
+                                            </td>
+                                            <td className="px-4 py-4 text-right">
+                                                <div className="flex flex-wrap justify-end gap-2">
+                                                    <Link
+                                                        href={`/calls?customer_id=${encodeURIComponent(c.id)}`}
+                                                        className="rounded-full border border-zinc-700 bg-zinc-950 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-300 transition hover:border-red-500 hover:text-white"
+                                                    >
+                                                        View calls
+                                                    </Link>
+                                                    {c.vehicles[0] && (
+                                                        <Link
+                                                            href={`/vehicles/${encodeURIComponent(c.vehicles[0].id)}`}
+                                                            className="rounded-full border border-zinc-700 bg-zinc-950 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-300 transition hover:border-red-500 hover:text-white"
+                                                        >
+                                                            View vehicles
+                                                        </Link>
+                                                    )}
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    ))
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+            </section>
         </main>
+    );
+}
+
+function StatCard({ label, value, accent }: { label: string; value: string; accent?: 'emerald' }) {
+    return (
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-zinc-500">{label}</p>
+            <p className={`mt-2 text-2xl font-black ${accent === 'emerald' ? 'text-emerald-300' : 'text-white'}`}>{value}</p>
+        </div>
     );
 }
