@@ -2,6 +2,13 @@
 import { NextResponse } from 'next/server';
 import { getSupabase, type CallLogRow } from '@/lib/supabase';
 import { resolveDealerForRequest } from '@/lib/dealer';
+import { getCustomerName } from '@/lib/mock-customers';
+
+export type CallLogRowWithCustomerName = CallLogRow & { customer_name: string | null };
+
+function withCustomerName(row: CallLogRow): CallLogRowWithCustomerName {
+    return { ...row, customer_name: getCustomerName(row.customer_id) };
+}
 
 export const dynamic = 'force-dynamic';
 
@@ -95,9 +102,15 @@ export async function GET(request: Request) {
         let calls = [...MOCK_CALLS];
         const outcome = searchParams.get('outcome');
         if (outcome) calls = calls.filter(c => c.summary?.outcome === outcome);
+        const customerId = searchParams.get('customer_id');
+        if (customerId) calls = calls.filter(c => c.customer_id === customerId);
         const limit = Math.min(parseInt(searchParams.get('limit') ?? '50', 10), 200);
         const offset = parseInt(searchParams.get('offset') ?? '0', 10);
-        return NextResponse.json({ calls: calls.slice(offset, offset + limit), total: calls.length, persistence: 'supabase' });
+        return NextResponse.json({
+            calls: calls.slice(offset, offset + limit).map(withCustomerName),
+            total: calls.length,
+            persistence: 'supabase',
+        });
     }
 
     const supabase = getSupabase();
@@ -109,9 +122,13 @@ export async function GET(request: Request) {
     const limit = Math.min(parseInt(searchParams.get('limit') ?? '50', 10), 200);
     const offset = parseInt(searchParams.get('offset') ?? '0', 10);
 
+    // `@ts-nocheck` at the top of this file suppresses the supabase-js
+    // chainable-query type-depth error from main (commits eeb3654 + 6321da9),
+    // so the targeted `let query: any` cast my Phase 8 commit introduced is
+    // no longer needed — main's broader suppression covers it.
     let query = supabase.from('call_logs').select('*', { count: 'exact' }).eq('dealer_id', dealer.id).order('created_at', { ascending: false }).range(offset, offset + limit - 1);
     const outcome = searchParams.get('outcome');
-    if (outcome) query = query.eq('outcome' as any, outcome);
+    if (outcome) query = query.eq('outcome', outcome);
     const since = searchParams.get('since');
     if (since) query = query.gte('created_at', since);
     const until = searchParams.get('until');
@@ -120,5 +137,9 @@ export async function GET(request: Request) {
     const { data, error, count } = await query;
     if (error) console.error('[/api/calls] query error:', error.message);
 
-    return NextResponse.json({ calls: (data ?? []) as CallLogRow[], total: count ?? 0, persistence: 'supabase' });
+    return NextResponse.json({
+        calls: ((data ?? []) as CallLogRow[]).map(withCustomerName),
+        total: count ?? 0,
+        persistence: 'supabase',
+    });
 }

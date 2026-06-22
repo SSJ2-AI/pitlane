@@ -45,8 +45,10 @@ const STATUS_STYLES: Record<string, string> = {
 
 const DEFAULT_LIMIT = 50;
 
+type CallRowWithName = CallLogRow & { customer_name?: string | null };
+
 interface CallListResponse {
-    calls: CallLogRow[];
+    calls: CallRowWithName[];
     total: number;
     persistence: 'supabase' | 'none';
 }
@@ -82,11 +84,13 @@ function formatCurrency(value: number | null) {
     return new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD', maximumFractionDigits: 0 }).format(value);
 }
 
-function callerLabel(call: CallLogRow) {
-    if (call.summary?.summary_text?.startsWith('Heuristic')) {
-        return call.customer_id ?? call.caller_phone;
-    }
-    return call.customer_id ?? call.caller_phone ?? 'Unknown caller';
+function callerLabel(call: CallRowWithName) {
+    return (
+        call.customer_name
+        ?? call.customer_id
+        ?? call.caller_phone
+        ?? 'Unknown caller'
+    );
 }
 
 export default function CallsPage() {
@@ -110,7 +114,7 @@ function CallsPageFallback() {
 function CallsPageInner() {
     const searchParams = useSearchParams();
 
-    const [calls, setCalls] = useState<CallLogRow[]>([]);
+    const [calls, setCalls] = useState<CallRowWithName[]>([]);
     const [total, setTotal] = useState(0);
     const [loading, setLoading] = useState(true);
     const [persistence, setPersistence] = useState<'supabase' | 'none'>('none');
@@ -213,15 +217,10 @@ function CallsPageInner() {
                     </div>
                     <nav className="flex flex-wrap items-center gap-3">
                         <VoiceStatusDot />
-                        <Link
-                            href="/dashboard"
-                            className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white"
-                        >
-                            Dashboard
-                        </Link>
-                        <span className="inline-flex items-center rounded-full border border-red-500/40 bg-red-600/15 px-4 py-2 text-sm font-semibold text-red-200">
-                            Calls
-                        </span>
+                        <Link href="/dashboard" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Dashboard</Link>
+                        <span className="inline-flex items-center rounded-full border border-red-500/40 bg-red-600/15 px-4 py-2 text-sm font-semibold text-red-200">Calls</span>
+                        <Link href="/customers" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Customers</Link>
+                        <Link href="/service-desk" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Service desk</Link>
                     </nav>
                 </div>
             </header>
@@ -348,10 +347,17 @@ function CallsPageInner() {
                             const isActive = selectedId === call.id;
                             return (
                                 <li key={call.id}>
-                                    <button
-                                        type="button"
+                                    <div
+                                        role="button"
+                                        tabIndex={0}
                                         onClick={() => setSelectedId(call.id)}
-                                        className={`w-full rounded-3xl border p-5 text-left transition ${
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter' || e.key === ' ') {
+                                                e.preventDefault();
+                                                setSelectedId(call.id);
+                                            }
+                                        }}
+                                        className={`w-full rounded-3xl border p-5 text-left transition cursor-pointer ${
                                             isActive
                                                 ? 'border-red-500/60 bg-red-600/10 shadow-lg shadow-red-950/30'
                                                 : 'border-zinc-800 bg-zinc-900 hover:border-zinc-600'
@@ -359,7 +365,17 @@ function CallsPageInner() {
                                     >
                                         <div className="flex flex-wrap items-start justify-between gap-3">
                                             <div className="min-w-0">
-                                                <p className="text-base font-black text-white">{callerLabel(call)}</p>
+                                                {call.customer_id ? (
+                                                    <Link
+                                                        href={`/customers/${encodeURIComponent(call.customer_id)}`}
+                                                        onClick={(e) => e.stopPropagation()}
+                                                        className="text-base font-black text-white transition hover:text-red-200"
+                                                    >
+                                                        {callerLabel(call)}
+                                                    </Link>
+                                                ) : (
+                                                    <p className="text-base font-black text-white">{callerLabel(call)}</p>
+                                                )}
                                                 <p className="mt-0.5 text-xs text-zinc-500">{call.caller_phone}</p>
                                             </div>
                                             <div className="flex flex-wrap items-center gap-2">
@@ -393,7 +409,7 @@ function CallsPageInner() {
                                                 {call.summary?.upsells_flagged?.length} upsell{call.summary?.upsells_flagged?.length === 1 ? '' : 's'} flagged
                                             </p>
                                         )}
-                                    </button>
+                                    </div>
                                 </li>
                             );
                         })}
@@ -418,14 +434,25 @@ function CallsPageInner() {
 
 function CallDetailPanel({ detail }: { detail: CallDetailResponse }) {
     const { call, appointments, upsells, loaner_requests } = detail;
+    const callWithName = call as CallRowWithName;
     const summary = call.summary;
     const transcript = call.transcript ?? [];
+    const callerHeader = callWithName.customer_name ?? call.customer_id ?? call.caller_phone ?? 'Unknown caller';
 
     return (
         <div className="space-y-4">
             <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-5">
                 <p className="text-xs font-semibold uppercase tracking-[0.28em] text-zinc-500">Call detail</p>
-                <h3 className="mt-2 text-xl font-black text-white">{call.customer_id ?? call.caller_phone}</h3>
+                {call.customer_id ? (
+                    <Link
+                        href={`/customers/${encodeURIComponent(call.customer_id)}`}
+                        className="mt-2 inline-block text-xl font-black text-white transition hover:text-red-200"
+                    >
+                        {callerHeader}
+                    </Link>
+                ) : (
+                    <h3 className="mt-2 text-xl font-black text-white">{callerHeader}</h3>
+                )}
                 <div className="mt-3 flex flex-wrap gap-2 text-xs text-zinc-400">
                     <span>{formatTime(call.started_at)}</span>
                     <span>·</span>
@@ -433,55 +460,77 @@ function CallDetailPanel({ detail }: { detail: CallDetailResponse }) {
                     <span>·</span>
                     <span className="capitalize">{call.direction}</span>
                 </div>
-                {summary?.summary_text && (
-                    <p className="mt-3 rounded-2xl border border-zinc-800 bg-zinc-950 p-4 text-sm leading-6 text-zinc-200">
-                        {summary.summary_text}
-                    </p>
-                )}
-                {summary?.generated_by && (
-                    <p className="mt-2 text-[10px] uppercase tracking-[0.22em] text-zinc-500">
-                        Summary by {summary.generated_by}
+            </section>
+
+            {/* ─── What the call was about ─── */}
+            <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-5">
+                <p className="text-xs font-semibold uppercase tracking-[0.28em] text-zinc-500">What the call was about</p>
+                {summary?.summary_text ? (
+                    <>
+                        <p className="mt-3 rounded-2xl border border-zinc-800 bg-zinc-950 p-4 text-sm leading-6 text-zinc-200">
+                            {summary.summary_text}
+                        </p>
+                        {summary.generated_by && (
+                            <p className="mt-2 text-[10px] uppercase tracking-[0.22em] text-zinc-500">
+                                Summary by {summary.generated_by}
+                            </p>
+                        )}
+                    </>
+                ) : (
+                    <p className="mt-3 rounded-2xl border border-dashed border-zinc-800 bg-zinc-950 p-4 text-sm italic text-zinc-500">
+                        No summary yet —{' '}
+                        {call.status === 'in_progress'
+                            ? 'call is still in progress, summary will appear once Aria hangs up.'
+                            : 'Aria did not generate a summary for this call (either the post-call webhook hasn\u2019t fired yet or the summariser fell back to no-op).'}
                     </p>
                 )}
             </section>
 
-            {summary && (summary.topics.length > 0 || summary.action_items.length > 0) && (
+            {/* ─── Topics ─── */}
+            {summary && summary.topics.length > 0 && (
                 <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-5">
-                    {summary.topics.length > 0 && (
-                        <div className="mb-3">
-                            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-zinc-500">Topics</p>
-                            <div className="mt-2 flex flex-wrap gap-2">
-                                {summary.topics.map((topic) => (
-                                    <span key={topic} className="rounded-full border border-zinc-700 bg-zinc-950 px-3 py-1 text-xs text-zinc-200">
-                                        {topic}
-                                    </span>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-                    {summary.action_items.length > 0 && (
-                        <div>
-                            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-zinc-500">Action items</p>
-                            <ul className="mt-2 space-y-2">
-                                {summary.action_items.map((item) => (
-                                    <li key={item} className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-200">
-                                        {item}
-                                    </li>
-                                ))}
-                            </ul>
-                        </div>
-                    )}
+                    <p className="text-xs font-semibold uppercase tracking-[0.24em] text-zinc-500">Topics</p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                        {summary.topics.map((topic) => (
+                            <span key={topic} className="rounded-full border border-zinc-700 bg-zinc-950 px-3 py-1 text-xs text-zinc-200">
+                                {topic}
+                            </span>
+                        ))}
+                    </div>
+                </section>
+            )}
+
+            {/* ─── Action items (checklist) ─── */}
+            {summary && summary.action_items.length > 0 && (
+                <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-5">
+                    <p className="text-xs font-semibold uppercase tracking-[0.24em] text-zinc-500">Action items</p>
+                    <ul className="mt-3 space-y-2">
+                        {summary.action_items.map((item) => (
+                            <li
+                                key={item}
+                                className="flex items-start gap-3 rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-200"
+                            >
+                                <span
+                                    aria-hidden="true"
+                                    className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-emerald-500/50 bg-emerald-500/10 text-xs font-black text-emerald-300"
+                                >
+                                    ✓
+                                </span>
+                                <span className="leading-6">{item}</span>
+                            </li>
+                        ))}
+                    </ul>
                 </section>
             )}
 
             {(summary?.upsells_flagged?.length ?? 0) > 0 && (
                 <section className="rounded-3xl border border-amber-500/40 bg-amber-500/10 p-5">
-                    <p className="text-xs font-semibold uppercase tracking-[0.24em] text-amber-200">Upsells flagged</p>
+                    <p className="text-xs font-semibold uppercase tracking-[0.24em] text-amber-200">Flagged upsells</p>
                     <ul className="mt-3 space-y-2">
                         {summary?.upsells_flagged?.map((u, idx) => (
                             <li key={`${u.type}-${idx}`} className="rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-sm text-amber-100">
                                 <div className="flex items-center justify-between gap-3">
-                                    <span className="font-bold">{u.type}</span>
+                                    <span className="font-bold">{u.type.replace(/_/g, ' ')}</span>
                                     <span className="font-black text-amber-200">{formatCurrency(u.value_est ?? null)}</span>
                                 </div>
                                 {u.description && <p className="mt-1 text-xs text-amber-100/80">{u.description}</p>}
