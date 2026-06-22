@@ -299,10 +299,24 @@ interface PostCallRequestBody {
   conversation_id?: string
   call_id?: string
   call_sid?: string
+  /** Top-level fields some early ElevenLabs configs ship — kept as a fallback. */
   caller_phone?: string
   called_number?: string
   duration_secs?: number
   duration_seconds?: number
+  /** Production ElevenLabs post-call shape uses this field name. */
+  call_duration_secs?: number
+  /**
+   * Production ElevenLabs post-call shape nests the Twilio caller + dialed
+   * numbers under metadata.phone_call. We check this path last (after the
+   * legacy top-level fields) so old test fixtures continue to work.
+   */
+  metadata?: {
+    phone_call?: {
+      external_number?: string  // caller
+      to_number?: string        // called number
+    }
+  }
   transcript?: PostCallTranscriptTurn[]
   status?: string
   summary?: string
@@ -332,21 +346,44 @@ router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Re
   const body = (req.body ?? {}) as PostCallRequestBody
   const conversationId = body.conversation_id ?? body.call_id ?? null
   const callSid = body.call_sid ?? null
-  const callerPhone = (body.caller_phone ?? '').trim()
-  const duration = body.duration_secs ?? body.duration_seconds ?? 0
+  // Caller phone fallback chain. Production ElevenLabs ships this in
+  // metadata.phone_call.external_number; older test fixtures used
+  // top-level caller_phone. Try both.
+  const callerPhone = (
+    body.caller_phone
+    ?? body.metadata?.phone_call?.external_number
+    ?? ''
+  ).trim()
+  // Duration fallback chain. Production payloads use call_duration_secs;
+  // older / synthetic payloads have duration_secs or duration_seconds.
+  const duration =
+    body.duration_secs
+    ?? body.duration_seconds
+    ?? body.call_duration_secs
+    ?? 0
   const status = normaliseStatus(body.status)
   const transcript = normaliseTranscript(body.transcript)
 
-  // Resolve the dealer the same way the pre-call webhook did so the post-call
-  // upsert into call_logs preserves the correct dealer_id. When ElevenLabs
-  // doesn't include called_number on post-call payloads, the pre-call row's
-  // dealer_id will already be set; processPostCall passes dealer.id which we
-  // resolve via DEFAULT_DEALER fallback.
-  const dealer = await getDealerByPhone(body.called_number)
+  // Dealer resolution also accepts the metadata-nested called number.
+  const dealer = await getDealerByPhone(
+    body.called_number ?? body.metadata?.phone_call?.to_number,
+  )
 
   console.log(
     `[Webhook] post-call conv=${conversationId ?? 'n/a'} sid=${callSid ?? 'n/a'} ` +
-    `phone=${callerPhone || 'unknown'} dealer=${dealer.name} dur=${duration}s status=${status} turns=${transcript.length}`,
+    `phone=${callerPhone || 'unknown'} dealer=${dealer.name} dur=${duration}s ` +
+    `status=${status} turns=${transcript.length}`,
+  )
+  // DEBUG dump: keys + shape, not values, so we don't print PII or
+  // multi-KB transcripts to the log. Lets us confirm against ElevenLabs
+  // payload-format changes without spamming production logs.
+  console.debug(
+    '[Webhook] post-call body keys:',
+    Object.keys(body),
+    'metadata keys:',
+    body.metadata ? Object.keys(body.metadata) : null,
+    'phone_call keys:',
+    body.metadata?.phone_call ? Object.keys(body.metadata.phone_call) : null,
   )
 
   const result = await processPostCall({
