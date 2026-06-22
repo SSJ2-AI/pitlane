@@ -124,7 +124,7 @@ export default function CustomersPage() {
                         ))}
                         {filtered.length === 0 && (
                             <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-10 text-center text-zinc-500">
-                                No customers match "{search}"
+                                No customers match &quot;{search}&quot;
                             </div>
                         )}
                     </div>
