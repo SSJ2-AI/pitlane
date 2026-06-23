@@ -393,13 +393,128 @@ export function findMockRepairOrders(vehicleId: string, limit = 10): MockRepairO
         .slice(0, limit)
 }
 
-/**
- * Mock recall lookup by VIN. In production this will call NHTSA's
- * /api.nhtsa.gov/recalls/recallsByVehicle endpoint (or its VIN-search
- * equivalent). The function shape is set up so swapping in a real fetch is
- * a one-function change; the dashboard surface won't notice.
- */
-export async function fetchOpenRecallsByVin(vin: string): Promise<MockRecall[]> {
-    // TODO(phase-6+): replace with NHTSA fetch. For now: synchronous mock.
+// ─── NHTSA recall lookup ─────────────────────────────────────────────────────
+//
+// `fetchOpenRecallsByVin` resolves open recalls for a VIN by:
+//   1. Resolving make/model/year — from MOCK_VEHICLES for known demo VINs
+//      (fast path; no extra request), or via NHTSA's free vPIC VIN decoder
+//      otherwise.
+//   2. Calling NHTSA's recallsByVehicle endpoint with the resolved metadata.
+//   3. Mapping each result to the dashboard's MockRecall shape.
+//
+// Falls back to MOCK_RECALLS_BY_VIN on any network error, non-2xx, or
+// empty live result — so the Vercel demo still renders Sophie's EPS recall
+// and James's fuel-injector recall even when NHTSA is unreachable or has
+// no record for the (fictional) demo VINs.
+//
+// The fetch uses Next.js' `next.revalidate: 86_400` so subsequent hits
+// within a 24h window are served from the framework cache.
+
+const NHTSA_DECODE_VIN_URL = 'https://vpic.nhtsa.dot.gov/api/vehicles/decodevin'
+const NHTSA_RECALLS_URL = 'https://api.nhtsa.gov/recalls/recallsByVehicle'
+const NHTSA_FETCH_REVALIDATE_SECS = 86_400
+
+interface VehicleMeta {
+    make: string
+    model: string
+    year: number
+}
+
+interface NhtsaRecallResponseItem {
+    NHTSACampaignNumber?: string
+    Component?: string
+    Summary?: string
+    Consequence?: string
+    Remedy?: string
+    RemedyStatus?: string
+    ReportReceivedDate?: string
+}
+
+function vehicleMetaFromMock(vin: string): VehicleMeta | null {
+    const v = MOCK_VEHICLES.find((mv) => mv.vin === vin)
+    if (!v) return null
+    return { make: v.make, model: v.model, year: v.year }
+}
+
+async function decodeVinViaNhtsa(vin: string): Promise<VehicleMeta | null> {
+    try {
+        const res = await fetch(`${NHTSA_DECODE_VIN_URL}/${encodeURIComponent(vin)}?format=json`, {
+            next: { revalidate: NHTSA_FETCH_REVALIDATE_SECS },
+        })
+        if (!res.ok) return null
+        const payload = (await res.json()) as {
+            Results?: Array<{ Variable?: string; Value?: string | null }>
+        }
+        const lookup = (variable: string): string | null => {
+            const row = (payload.Results ?? []).find((r) => r.Variable === variable)
+            const value = row?.Value
+            return value && value !== 'null' ? value : null
+        }
+        const make = lookup('Make')
+        const model = lookup('Model')
+        const yearStr = lookup('Model Year')
+        const year = yearStr ? Number.parseInt(yearStr, 10) : NaN
+        if (!make || !model || Number.isNaN(year)) return null
+        return { make, model, year }
+    } catch {
+        return null
+    }
+}
+
+function parseIssuedDate(raw: string | undefined): string {
+    if (!raw) return ''
+    // NHTSA returns dates like "12/15/2021". Convert to ISO YYYY-MM-DD so
+    // the dashboard sort + display formatters don't have to special-case.
+    const m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
+    if (m) {
+        const [, mm, dd, yyyy] = m
+        return `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`
+    }
+    const parsed = new Date(raw)
+    return Number.isNaN(parsed.getTime()) ? '' : parsed.toISOString().slice(0, 10)
+}
+
+function toMockRecall(item: NhtsaRecallResponseItem): MockRecall {
+    const remedy = (item.Remedy ?? '').trim()
+    return {
+        nhtsa_id: item.NHTSACampaignNumber ?? '',
+        campaign: item.NHTSACampaignNumber ?? '',
+        component: item.Component ?? '',
+        consequence: item.Consequence ?? item.Summary ?? '',
+        remedy: remedy || item.RemedyStatus || '',
+        remedy_available: remedy.length > 0,
+        issued: parseIssuedDate(item.ReportReceivedDate),
+    }
+}
+
+export function getMockRecalls(vin: string): MockRecall[] {
     return MOCK_RECALLS_BY_VIN[vin] ?? []
+}
+
+export async function fetchOpenRecallsByVin(vin: string): Promise<MockRecall[]> {
+    if (!vin) return getMockRecalls(vin)
+
+    try {
+        const meta = vehicleMetaFromMock(vin) ?? (await decodeVinViaNhtsa(vin))
+        if (!meta) return getMockRecalls(vin)
+
+        const params = new URLSearchParams({
+            make: meta.make,
+            model: meta.model,
+            modelYear: String(meta.year),
+        })
+        const res = await fetch(`${NHTSA_RECALLS_URL}?${params.toString()}`, {
+            next: { revalidate: NHTSA_FETCH_REVALIDATE_SECS },
+        })
+        if (!res.ok) return getMockRecalls(vin)
+        const data = (await res.json()) as { results?: NhtsaRecallResponseItem[] }
+        const live = (data.results ?? []).map(toMockRecall).filter((r) => r.nhtsa_id || r.component)
+
+        // Empty live response → fall back to scripted demo so the recall
+        // card on /vehicles/[id] stays populated for known mock VINs.
+        if (live.length === 0) return getMockRecalls(vin)
+        return live
+    } catch {
+        return getMockRecalls(vin)
+    }
 }
