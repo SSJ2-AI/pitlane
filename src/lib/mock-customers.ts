@@ -11,6 +11,7 @@
 // dataset.
 
 import { MOCK_REPAIR_ORDERS, MOCK_VEHICLES, type MockVehicle } from './mock-vehicles';
+import { predictNextServiceForVehicle } from './next-service';
 
 export type LoyaltyTier = 'Bronze' | 'Silver' | 'Gold' | 'Platinum';
 
@@ -181,3 +182,172 @@ export function getLastServiceForCustomer(customerId: string): string | null {
         .sort((a, b) => (a < b ? 1 : -1));
     return dates[0] ?? null;
 }
+
+// ─── Overdue-for-service derivation ─────────────────────────────────────────
+//
+// A customer counts as overdue when EITHER:
+//   (a) the most recent service across all their vehicles is older than the
+//       6-month threshold (a soft proxy for "we haven't seen them in a
+//       while" — the spec calls this out explicitly), OR
+//   (b) any one of their vehicles passes its predictNextServiceForVehicle()
+//       due-date — i.e. mileage or calendar interval has lapsed.
+//
+// Both branches respect the 6-month / 8,000-km rule in next-service.ts so
+// the badge and the /vehicles/[id] progress bar agree on what "overdue"
+// means.
+
+export const OVERDUE_SERVICE_THRESHOLD_DAYS = 182;
+
+function daysSinceIso(iso: string | null, today: Date): number | null {
+    if (!iso) return null;
+    const t = new Date(iso).getTime();
+    if (Number.isNaN(t)) return null;
+    return Math.floor((today.getTime() - t) / 86_400_000);
+}
+
+export function isCustomerServiceOverdue(customerId: string, today: Date = new Date()): boolean {
+    const lastServiceDays = daysSinceIso(getLastServiceForCustomer(customerId), today);
+    if (lastServiceDays !== null && lastServiceDays > OVERDUE_SERVICE_THRESHOLD_DAYS) return true;
+
+    const vehicles = MOCK_VEHICLES.filter((v) => v.customer_id === customerId);
+    for (const v of vehicles) {
+        const orders = MOCK_REPAIR_ORDERS.filter((ro) => ro.vehicle_id === v.id);
+
+        // If a vehicle has an active RO today (in_progress / awaiting_parts)
+        // it's literally in the shop right now — surfacing "service overdue"
+        // on the customer card would be noise and would conflict with what
+        // /service-desk already shows. Treat that vehicle as covered.
+        const hasActiveRO = orders.some((ro) => ro.status === 'in_progress' || ro.status === 'awaiting_parts');
+        if (hasActiveRO) continue;
+
+        const prediction = predictNextServiceForVehicle(v, orders, today);
+        if (prediction.days_remaining !== null && prediction.days_remaining < 0) return true;
+        if (prediction.km_remaining !== null && prediction.km_remaining < 0) return true;
+    }
+    return false;
+}
+
+// ─── Today's appointments (dashboard morning briefing) ──────────────────────
+//
+// MOCK_APPOINTMENTS feeds the /dashboard 'Today's appointments' panel. We
+// generate dates relative to "now" so the panel always has something
+// recent regardless of when the demo runs. The Aria-context snippet on
+// each appointment points back to the call in MOCK_CALLS by call_id so
+// "Aria booked this on [date] — [summary excerpt]" can be derived without
+// re-storing summary text.
+
+export interface MockAppointment {
+    id: string;
+    customer_id: string;
+    vehicle_id: string;
+    /** ISO YYYY-MM-DD — relative to today so the panel keeps refreshing. */
+    date: string;
+    /** 'HH:MM' local. */
+    time: string;
+    service_type: string;
+    advisor_name: string;
+    duration_est_hours: number;
+    confirmation_number: string;
+    /** Which Aria call booked this appointment (joins to MOCK_CALLS.id). */
+    source_call_id: string | null;
+    notes?: string;
+}
+
+function isoOffsetDays(days: number): string {
+    const d = new Date();
+    d.setDate(d.getDate() + days);
+    return d.toISOString().slice(0, 10);
+}
+
+export const MOCK_APPOINTMENTS: MockAppointment[] = [
+    {
+        id: 'appt_001',
+        customer_id: 'cust_001',
+        vehicle_id: 'veh_001a',
+        date: isoOffsetDays(0),
+        time: '08:30',
+        service_type: 'Annual Service B',
+        advisor_name: 'Michael Chen',
+        duration_est_hours: 3,
+        confirmation_number: 'CNF-2026-4471',
+        source_call_id: 'call_001',
+        notes: 'Customer prefers loaner if service runs past 4h.',
+    },
+    {
+        id: 'appt_002',
+        customer_id: 'cust_002',
+        vehicle_id: 'veh_002a',
+        date: isoOffsetDays(0),
+        time: '10:30',
+        service_type: 'Oil Change + Cabin Air Filter',
+        advisor_name: 'Sarah Kowalski',
+        duration_est_hours: 1.5,
+        confirmation_number: 'CNF-2026-4490',
+        source_call_id: 'call_002',
+    },
+    {
+        id: 'appt_003',
+        customer_id: 'cust_005',
+        vehicle_id: 'veh_005a',
+        date: isoOffsetDays(0),
+        time: '14:00',
+        service_type: 'Diagnostic — intermittent warning light',
+        advisor_name: 'Michael Chen',
+        duration_est_hours: 2,
+        confirmation_number: 'CNF-2026-5008',
+        source_call_id: 'call_005',
+        notes: 'Post-track diagnostic. Customer driving GT3 RS.',
+    },
+    {
+        id: 'appt_004',
+        customer_id: 'cust_003',
+        vehicle_id: 'veh_003a',
+        date: isoOffsetDays(1),
+        time: '09:00',
+        service_type: 'RO completion + loaner return',
+        advisor_name: 'Tom Reeves',
+        duration_est_hours: 0.5,
+        confirmation_number: 'CNF-2026-4491',
+        source_call_id: 'call_003',
+        notes: 'Cayenne loaner out — return on RO completion.',
+    },
+    {
+        id: 'appt_005',
+        customer_id: 'cust_002',
+        vehicle_id: 'veh_002a',
+        date: isoOffsetDays(2),
+        time: '11:00',
+        service_type: 'BMS software update + recall NHTSA-2025-0188',
+        advisor_name: 'Sarah Kowalski',
+        duration_est_hours: 2,
+        confirmation_number: 'CNF-2026-5101',
+        source_call_id: 'call_007',
+        notes: 'Loaner Taycan requested.',
+    },
+];
+
+/**
+ * Appointments scheduled today (ISO YYYY-MM-DD match in local time).
+ * If empty, falls back to "next non-empty day".
+ */
+// `today` kept for future deterministic-test seam.
+export function getTodaysAppointments(today?: Date): {
+    appointments: MockAppointment[];
+    label: 'today' | 'tomorrow' | 'upcoming';
+} {
+    void today;
+    const todayIso = isoOffsetDays(0);
+    const todays = MOCK_APPOINTMENTS.filter((a) => a.date === todayIso);
+    if (todays.length > 0) return { appointments: todays, label: 'today' };
+
+    const tomorrowIso = isoOffsetDays(1);
+    const tomorrows = MOCK_APPOINTMENTS.filter((a) => a.date === tomorrowIso);
+    if (tomorrows.length > 0) return { appointments: tomorrows, label: 'tomorrow' };
+
+    const upcoming = MOCK_APPOINTMENTS
+        .filter((a) => a.date >= todayIso)
+        .sort((a, b) => (a.date < b.date ? -1 : 1))
+        .slice(0, 5);
+    return { appointments: upcoming, label: 'upcoming' };
+}
+
