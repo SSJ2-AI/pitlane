@@ -284,6 +284,56 @@ export interface CdkSyncEnqueue {
   payload: Record<string, unknown>
 }
 
+// ─── customer_intakes (Phase 10 feature 2) ────────────────────────────────────
+
+export interface CustomerIntakeInsert {
+  call_log_id?: string | null
+  dealer_id?: string | null
+  phone: string
+  full_name: string
+  vehicle_year?: number | null
+  vehicle_make?: string | null
+  vehicle_model?: string | null
+  vehicle_vin?: string | null
+  mileage_approx?: number | null
+  reason_for_calling?: string | null
+}
+
+/**
+ * Insert an Aria-collected new-customer intake row. Falls back gracefully
+ * when the table doesn't exist yet (deployment that hasn't applied
+ * migration 0007) — returns null + logs a warning so the tool can still
+ * confirm receipt to Aria.
+ */
+export async function insertCustomerIntake(row: CustomerIntakeInsert): Promise<string | null> {
+  const client = getSupabase()
+  if (!client) return null
+  try {
+    const { data, error } = await client
+      .from('customer_intakes')
+      .insert(row)
+      .select('id')
+      .single()
+    if (error) {
+      // 42P01 = undefined_table — Supabase hasn't applied migration 0007 yet.
+      // Surface a one-line warning rather than throw so the WebSocket
+      // broadcast + tool response still succeed.
+      const undefinedTable =
+        (error as { code?: string }).code === '42P01' ||
+        /relation "customer_intakes" does not exist/i.test(error.message ?? '')
+      if (undefinedTable) {
+        console.warn('[Supabase] customer_intakes table missing — apply migration 0007')
+        return null
+      }
+      throw error
+    }
+    return (data as { id: string } | null)?.id ?? null
+  } catch (err) {
+    console.error('[Supabase] insertCustomerIntake failed:', err instanceof Error ? err.message : err)
+    return null
+  }
+}
+
 /** Queue an outbound CDK write. The Phase 3 worker drains this. */
 export async function queueCdkSync(row: CdkSyncEnqueue): Promise<string | null> {
   const client = getSupabase()

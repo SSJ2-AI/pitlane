@@ -9,6 +9,7 @@ import { recordEvent, startInboundCall } from '../store/callStore'
 import {
   getOrCreateCallLogIdForConversation,
   insertAppointment,
+  insertCustomerIntake,
   insertLoanerRequest,
   insertUpsell,
   isSupabaseConfigured,
@@ -423,6 +424,167 @@ async function handleSendSms(input: SendSmsToolBody, res: Response): Promise<Res
     dry_run: result.dry_run,
     rendered_message: result.rendered_message,
     failure_reason: result.failure_reason,
+  })
+}
+
+// ─── Phase 10 feature 2: intake_new_customer ─────────────────────────────────
+//
+// ElevenLabs tool registration (paste in agent → Tools → Webhook tool):
+//   URL:    https://pitlane-voice-production.up.railway.app/tools/intake-new-customer
+//   Method: GET (or POST with JSON body)
+//   Query params / body fields:
+//     full_name           string  required
+//     phone               string  required
+//     vehicle_year        number  optional
+//     vehicle_make        string  optional
+//     vehicle_model       string  optional
+//     vehicle_vin         string  optional
+//     mileage_approx      number  optional
+//     reason_for_calling  string  optional
+//     call_id             string  optional (ElevenLabs conversation_id)
+//
+// Aria should call this when customer_lookup returns { found: false } — i.e.
+// the caller isn't in the dealer's CDK or PitLane's Supabase. Side effects:
+//   1. Console log for audit trail.
+//   2. INSERT into customer_intakes (Supabase, if configured + migration 0007
+//      applied — graceful no-op otherwise).
+//   3. Broadcast a NEW_CUSTOMER_INTAKE screen pop to /ws so the service
+//      desk sees a toast immediately.
+//   4. Return a confirmation message Aria reads back to the caller.
+
+interface IntakeNewCustomerInput {
+  full_name: string
+  phone: string
+  vehicle_year?: number | null
+  vehicle_make?: string | null
+  vehicle_model?: string | null
+  vehicle_vin?: string | null
+  mileage_approx?: number | null
+  reason_for_calling?: string | null
+  call_id?: string | null
+}
+
+const INTAKE_CONFIRMATION =
+  "Thanks — I've noted your details. Our service team will reach out to confirm your profile. How can I help you today?"
+
+router.post('/intake-new-customer', (req: Request, res: Response): void => {
+  void handleIntakeNewCustomer(req.body as IntakeNewCustomerInput, res)
+})
+
+router.get('/intake-new-customer', (req: Request, res: Response): void => {
+  const parseNum = (raw: unknown): number | null => {
+    if (typeof raw !== 'string' || raw.trim() === '') return null
+    const n = Number(raw)
+    return Number.isFinite(n) ? n : null
+  }
+  void handleIntakeNewCustomer(
+    {
+      full_name: req.query.full_name as string,
+      phone: req.query.phone as string,
+      vehicle_year: parseNum(req.query.vehicle_year),
+      vehicle_make: (req.query.vehicle_make as string | undefined) ?? null,
+      vehicle_model: (req.query.vehicle_model as string | undefined) ?? null,
+      vehicle_vin: (req.query.vehicle_vin as string | undefined) ?? null,
+      mileage_approx: parseNum(req.query.mileage_approx),
+      reason_for_calling: (req.query.reason_for_calling as string | undefined) ?? null,
+      call_id: (req.query.call_id as string | undefined) ?? null,
+    },
+    res,
+  )
+})
+
+async function handleIntakeNewCustomer(
+  input: IntakeNewCustomerInput,
+  res: Response,
+): Promise<Response> {
+  const fullName = (input.full_name ?? '').trim()
+  const phone = (input.phone ?? '').trim()
+
+  const vehicleSummary = [input.vehicle_year, input.vehicle_make, input.vehicle_model]
+    .filter((p) => p !== undefined && p !== null && p !== '')
+    .join(' ')
+    .trim()
+
+  console.log(
+    `[Tool] intake_new_customer name=${fullName || 'n/a'} ` +
+    `phone=${phone || 'n/a'} ` +
+    `vehicle=${vehicleSummary || 'n/a'} ` +
+    `mileage=${input.mileage_approx ?? 'n/a'} ` +
+    `call=${input.call_id ?? 'n/a'}`,
+  )
+
+  if (!fullName || !phone) {
+    return res.status(400).json({
+      received: false,
+      error: 'full_name and phone are required',
+    })
+  }
+
+  // Resolve dealer from the in-progress call_logs row when we have a call_id.
+  const dealer = await resolveDealerForCall(input.call_id ?? undefined)
+
+  // Record an event on the in-memory call store too, so the call timeline
+  // shows the intake even before the Supabase row lands.
+  if (input.call_id) {
+    recordEvent(input.call_id, 'NOTE_ADDED', {
+      source: 'aria',
+      action: 'intake_new_customer',
+      full_name: fullName,
+      phone,
+      vehicle: vehicleSummary || null,
+    })
+  }
+
+  let intakeId: string | null = null
+  let callLogId: string | null = null
+  if (isSupabaseConfigured()) {
+    callLogId = input.call_id
+      ? await getOrCreateCallLogIdForConversation(input.call_id, {
+          customerId: null,
+          phone,
+          dealerId: dealer.id,
+        })
+      : null
+
+    intakeId = await insertCustomerIntake({
+      call_log_id: callLogId,
+      dealer_id: dealer.id,
+      phone,
+      full_name: fullName,
+      vehicle_year: input.vehicle_year ?? null,
+      vehicle_make: input.vehicle_make ?? null,
+      vehicle_model: input.vehicle_model ?? null,
+      vehicle_vin: input.vehicle_vin ?? null,
+      mileage_approx: input.mileage_approx ?? null,
+      reason_for_calling: input.reason_for_calling ?? null,
+    })
+  }
+
+  // Broadcast a screen-pop so the service desk sees the intake immediately.
+  // Done regardless of Supabase status so the demo flow still surfaces in
+  // the dashboard even without persistence.
+  broadcastScreenPop({
+    type: 'NEW_CUSTOMER_INTAKE',
+    callId: input.call_id ?? null,
+    intake: {
+      intakeId,
+      phone,
+      fullName,
+      vehicleYear: input.vehicle_year ?? null,
+      vehicleMake: input.vehicle_make ?? null,
+      vehicleModel: input.vehicle_model ?? null,
+      vehicleVin: input.vehicle_vin ?? null,
+      mileageApprox: input.mileage_approx ?? null,
+      reasonForCalling: input.reason_for_calling ?? null,
+    },
+    timestamp: new Date().toISOString(),
+  })
+
+  return res.json({
+    received: true,
+    intake_id: intakeId,
+    confirmation: INTAKE_CONFIRMATION,
+    persistence: intakeId ? 'supabase' : isSupabaseConfigured() ? 'supabase_pending_migration' : 'in-memory',
   })
 }
 

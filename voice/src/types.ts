@@ -92,6 +92,25 @@ export type ScreenPopEvent =
       callType: OutboundCallType
       timestamp: string
     }
+  | {
+      // Phase 10 feature 2 — Aria collected a new caller's details after
+      // customer-lookup missed. The service desk shows a toast so the
+      // advisor can verify + convert the intake into a real customer.
+      type: 'NEW_CUSTOMER_INTAKE'
+      callId: string | null
+      intake: {
+        intakeId: string | null
+        phone: string
+        fullName: string
+        vehicleYear?: number | null
+        vehicleMake?: string | null
+        vehicleModel?: string | null
+        vehicleVin?: string | null
+        mileageApprox?: number | null
+        reasonForCalling?: string | null
+      }
+      timestamp: string
+    }
 
 export type OutboundCallType =
   | 'appointment_reminder'
