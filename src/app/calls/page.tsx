@@ -50,7 +50,7 @@ type CallRowWithName = CallLogRow & { customer_name?: string | null };
 interface CallListResponse {
     calls: CallRowWithName[];
     total: number;
-    persistence: 'supabase' | 'none';
+    persistence: 'supabase' | 'mock' | 'none';
 }
 
 interface CallDetailResponse {
@@ -84,13 +84,13 @@ function formatCurrency(value: number | null) {
     return new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD', maximumFractionDigits: 0 }).format(value);
 }
 
+// Spec (Phase 9 task 1): show the customer's full name when MOCK_CUSTOMERS
+// resolves it; otherwise fall back to the phone number — NOT the raw
+// `cust_001` internal id.
 function callerLabel(call: CallRowWithName) {
-    return (
-        call.customer_name
-        ?? call.customer_id
-        ?? call.caller_phone
-        ?? 'Unknown caller'
-    );
+    if (call.customer_name) return call.customer_name;
+    if (call.caller_phone) return call.caller_phone;
+    return 'Unknown caller';
 }
 
 export default function CallsPage() {
@@ -117,10 +117,16 @@ function CallsPageInner() {
     const [calls, setCalls] = useState<CallRowWithName[]>([]);
     const [total, setTotal] = useState(0);
     const [loading, setLoading] = useState(true);
-    const [persistence, setPersistence] = useState<'supabase' | 'none'>('none');
+    const [persistence, setPersistence] = useState<'supabase' | 'mock' | 'none'>('none');
     const [error, setError] = useState<string | null>(null);
 
-    const [customerFilter, setCustomerFilter] = useState(() => searchParams.get('customer_id') ?? '');
+    // /calls?customer_id=cust_001 (linked from /customers, /dashboard,
+    // /analytics) is honoured by pre-filling the server-side filter so
+    // we only fetch that customer's history. The client-side search box
+    // (Phase 9 task 1) replaces the older raw-id text input.
+    const initialCustomerId = searchParams.get('customer_id') ?? '';
+    const [customerIdFilter, setCustomerIdFilter] = useState(initialCustomerId);
+    const [search, setSearch] = useState('');
     const [outcomeFilter, setOutcomeFilter] = useState<CallOutcome | ''>(() => (searchParams.get('outcome') as CallOutcome) ?? '');
     const [since, setSince] = useState(() => searchParams.get('since') ?? '');
     const [until, setUntil] = useState(() => searchParams.get('until') ?? '');
@@ -131,13 +137,13 @@ function CallsPageInner() {
 
     const buildQuery = useCallback(() => {
         const params = new URLSearchParams();
-        if (customerFilter.trim()) params.set('customer_id', customerFilter.trim());
+        if (customerIdFilter.trim()) params.set('customer_id', customerIdFilter.trim());
         if (outcomeFilter) params.set('outcome', outcomeFilter);
         if (since) params.set('since', since);
         if (until) params.set('until', until);
         params.set('limit', String(DEFAULT_LIMIT));
         return params.toString();
-    }, [customerFilter, outcomeFilter, since, until]);
+    }, [customerIdFilter, outcomeFilter, since, until]);
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -190,17 +196,39 @@ function CallsPageInner() {
         };
     }, [selectedId]);
 
+    // Phase 9 task 1: client-side name / phone / email filter applied on
+    // top of the server-side filtered list. We match against the row's
+    // customer_name (enriched server-side in /api/calls), caller_phone,
+    // and customer_id, plus a digits-only variant of the phone so users
+    // can type "6475550101" or "647-555-0101" interchangeably.
+    const visibleCalls = useMemo<CallRowWithName[]>(() => {
+        const q = search.trim().toLowerCase();
+        if (!q) return calls;
+        const digits = q.replace(/\D/g, '');
+        return calls.filter((call) => {
+            if (call.customer_name && call.customer_name.toLowerCase().includes(q)) return true;
+            if (call.customer_id && call.customer_id.toLowerCase().includes(q)) return true;
+            if (call.caller_phone) {
+                if (call.caller_phone.toLowerCase().includes(q)) return true;
+                if (digits.length >= 4 && call.caller_phone.replace(/\D/g, '').includes(digits)) return true;
+            }
+            return false;
+        });
+    }, [calls, search]);
+
     const upsellTotal = useMemo(() => {
-        return calls.reduce((sum, call) => {
+        return visibleCalls.reduce((sum, call) => {
             const upsells = call.summary?.upsells_flagged ?? [];
             return sum + upsells.reduce((s, u) => s + (u.value_est ?? 0), 0);
         }, 0);
-    }, [calls]);
+    }, [visibleCalls]);
 
     function handleSubmit(event: FormEvent<HTMLFormElement>) {
         event.preventDefault();
         void load();
     }
+
+    const linkedCustomerId = customerIdFilter.trim();
 
     return (
         <main className="min-h-screen bg-[#09090b] text-zinc-100">
@@ -220,6 +248,7 @@ function CallsPageInner() {
                         <Link href="/dashboard" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Dashboard</Link>
                         <span className="inline-flex items-center rounded-full border border-red-500/40 bg-red-600/15 px-4 py-2 text-sm font-semibold text-red-200">Calls</span>
                         <Link href="/customers" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Customers</Link>
+                        <Link href="/analytics" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Analytics</Link>
                         <Link href="/service-desk" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Service desk</Link>
                     </nav>
                 </div>
@@ -239,7 +268,10 @@ function CallsPageInner() {
                 <div className="mb-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                     <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
                         <p className="text-xs font-semibold uppercase tracking-[0.24em] text-zinc-500">Calls in view</p>
-                        <p className="mt-2 text-3xl font-black text-white">{calls.length}</p>
+                        <p className="mt-2 text-3xl font-black text-white">{visibleCalls.length}</p>
+                        {visibleCalls.length !== calls.length && (
+                            <p className="mt-1 text-[10px] uppercase tracking-[0.18em] text-zinc-500">of {calls.length} loaded</p>
+                        )}
                     </div>
                     <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
                         <p className="text-xs font-semibold uppercase tracking-[0.24em] text-zinc-500">Total on file</p>
@@ -251,20 +283,37 @@ function CallsPageInner() {
                     </div>
                     <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
                         <p className="text-xs font-semibold uppercase tracking-[0.24em] text-zinc-500">Persistence</p>
-                        <p className={`mt-2 text-xl font-black ${persistence === 'supabase' ? 'text-emerald-300' : 'text-amber-300'}`}>
-                            {persistence === 'supabase' ? 'Supabase' : 'Not configured'}
+                        <p className={`mt-2 text-xl font-black ${persistence === 'supabase' ? 'text-emerald-300' : persistence === 'mock' ? 'text-sky-300' : 'text-amber-300'}`}>
+                            {persistence === 'supabase' ? 'Supabase' : persistence === 'mock' ? 'Demo data' : 'Not configured'}
                         </p>
                     </div>
                 </div>
 
+                {linkedCustomerId && (
+                    <div className="mb-4 flex items-center justify-between rounded-2xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-100">
+                        <span>
+                            Showing calls for customer{' '}
+                            <code className="rounded bg-red-500/20 px-1.5">{linkedCustomerId}</code>
+                            {' '}only.
+                        </span>
+                        <button
+                            type="button"
+                            onClick={() => setCustomerIdFilter('')}
+                            className="rounded-full border border-red-300/40 bg-red-500/20 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.18em] text-red-100 transition hover:border-red-200 hover:text-white"
+                        >
+                            Clear customer filter
+                        </button>
+                    </div>
+                )}
+
                 <form onSubmit={handleSubmit} className="mb-6 rounded-3xl border border-zinc-800 bg-zinc-900 p-5">
-                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto]">
                         <label className="flex flex-col gap-1">
-                            <span className="text-xs font-semibold uppercase tracking-[0.24em] text-zinc-500">Customer ID</span>
+                            <span className="text-xs font-semibold uppercase tracking-[0.24em] text-zinc-500">Search</span>
                             <input
-                                value={customerFilter}
-                                onChange={(e) => setCustomerFilter(e.target.value)}
-                                placeholder="cust_001"
+                                value={search}
+                                onChange={(e) => setSearch(e.target.value)}
+                                placeholder="James Whitfield · +1 647… · sulaim@…"
                                 className="rounded-2xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-red-500"
                             />
                         </label>
@@ -301,14 +350,15 @@ function CallsPageInner() {
                         <div className="flex items-end gap-2">
                             <button
                                 type="submit"
-                                className="flex-1 rounded-2xl bg-red-600 px-4 py-2 text-sm font-bold uppercase tracking-[0.18em] text-white transition hover:bg-red-500"
+                                className="rounded-2xl bg-red-600 px-4 py-2 text-sm font-bold uppercase tracking-[0.18em] text-white transition hover:bg-red-500"
                             >
                                 {loading ? 'Loading…' : 'Apply'}
                             </button>
                             <button
                                 type="button"
                                 onClick={() => {
-                                    setCustomerFilter('');
+                                    setSearch('');
+                                    setCustomerIdFilter('');
                                     setOutcomeFilter('');
                                     setSince('');
                                     setUntil('');
@@ -333,15 +383,15 @@ function CallsPageInner() {
 
                 <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_420px]">
                     <ul className="space-y-3">
-                        {loading && calls.length === 0 && (
+                        {loading && visibleCalls.length === 0 && (
                             <li className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-900 px-5 py-8 text-center text-sm text-zinc-400">Loading…</li>
                         )}
-                        {!loading && calls.length === 0 && (
+                        {!loading && visibleCalls.length === 0 && (
                             <li className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-900 px-5 py-8 text-center text-sm text-zinc-400">
-                                No calls match these filters yet.
+                                {search ? `No calls match "${search}".` : 'No calls match these filters yet.'}
                             </li>
                         )}
-                        {calls.map((call) => {
+                        {visibleCalls.map((call) => {
                             const outcome = call.summary?.outcome;
                             const sentiment = call.summary?.sentiment;
                             const isActive = selectedId === call.id;
