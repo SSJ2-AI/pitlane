@@ -295,31 +295,51 @@ interface PostCallTranscriptTurn {
   timestamp?: number
 }
 
-interface PostCallRequestBody {
+/**
+ * All the post-call fields ElevenLabs sends, in either shape:
+ *   - the flat legacy shape (these fields at the top level), OR
+ *   - the production wrapped shape: { type, event_timestamp, data: <these> }
+ *
+ * We model them once and read from whichever envelope is populated.
+ */
+interface PostCallDataShape {
   conversation_id?: string
   call_id?: string
   call_sid?: string
-  /** Top-level fields some early ElevenLabs configs ship — kept as a fallback. */
+  /** Top-level legacy field. */
   caller_phone?: string
   called_number?: string
   duration_secs?: number
   duration_seconds?: number
-  /** Production ElevenLabs post-call shape uses this field name. */
+  /** Production shape uses this field name. */
   call_duration_secs?: number
   /**
-   * Production ElevenLabs post-call shape nests the Twilio caller + dialed
-   * numbers under metadata.phone_call. We check this path last (after the
-   * legacy top-level fields) so old test fixtures continue to work.
+   * Production shape nests Twilio caller + dialed numbers under
+   * metadata.phone_call. external_number = caller, to_number /
+   * internal_number = called number.
    */
   metadata?: {
     phone_call?: {
-      external_number?: string  // caller
-      to_number?: string        // called number
+      external_number?: string
+      to_number?: string
+      internal_number?: string
     }
   }
   transcript?: PostCallTranscriptTurn[]
   status?: string
   summary?: string
+}
+
+interface PostCallRequestBody extends PostCallDataShape {
+  /**
+   * Production ElevenLabs post-call webhook wraps everything below this
+   * field. Older configs / test fixtures send the fields at the top level
+   * — we accept both. Discovered from Railway log: '[Webhook] post-call
+   * body keys: [type, event_timestamp, data]'.
+   */
+  type?: string
+  event_timestamp?: number
+  data?: PostCallDataShape
 }
 
 function normaliseTranscript(input: PostCallTranscriptTurn[] | undefined): TranscriptTurn[] {
@@ -344,46 +364,76 @@ router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Re
   }
 
   const body = (req.body ?? {}) as PostCallRequestBody
-  const conversationId = body.conversation_id ?? body.call_id ?? null
-  const callSid = body.call_sid ?? null
-  // Caller phone fallback chain. Production ElevenLabs ships this in
-  // metadata.phone_call.external_number; older test fixtures used
-  // top-level caller_phone. Try both.
+
+  // ElevenLabs' production post-call webhook wraps the payload under a
+  // `data` envelope: { type: 'conversation.completion', event_timestamp,
+  // data: { conversation_id, metadata: { phone_call: {…} }, transcript,
+  // call_duration_secs, status, … } }. Earlier configs / synthetic
+  // fixtures send the fields at the top level. Read from whichever is
+  // populated, preferring `data` (production) over the top level
+  // (legacy) when both exist.
+  //
+  // Logged BEFORE the unwrap so a future payload-shape change is easy
+  // to diagnose — we'll see both the outer + inner keys side by side.
+  const rawData: PostCallDataShape =
+    (body.data && typeof body.data === 'object') ? body.data : body
+  console.log(
+    '[Webhook] post-call raw body keys:',
+    Object.keys(body),
+    'data keys:',
+    rawData === body ? 'none' : Object.keys(rawData),
+  )
+
+  const conversationId =
+    rawData.conversation_id
+    ?? rawData.call_id
+    ?? body.conversation_id
+    ?? body.call_id
+    ?? null
+  const callSid = rawData.call_sid ?? body.call_sid ?? null
   const callerPhone = (
-    body.caller_phone
+    rawData.caller_phone
+    ?? rawData.metadata?.phone_call?.external_number
+    ?? body.caller_phone
     ?? body.metadata?.phone_call?.external_number
     ?? ''
   ).trim()
-  // Duration fallback chain. Production payloads use call_duration_secs;
-  // older / synthetic payloads have duration_secs or duration_seconds.
   const duration =
-    body.duration_secs
+    rawData.duration_secs
+    ?? rawData.duration_seconds
+    ?? rawData.call_duration_secs
+    ?? body.duration_secs
     ?? body.duration_seconds
     ?? body.call_duration_secs
     ?? 0
-  const status = normaliseStatus(body.status)
-  const transcript = normaliseTranscript(body.transcript)
+  const status = normaliseStatus(rawData.status ?? body.status)
+  const transcript = normaliseTranscript(rawData.transcript ?? body.transcript)
+  const calledNumber =
+    rawData.called_number
+    ?? rawData.metadata?.phone_call?.to_number
+    ?? rawData.metadata?.phone_call?.internal_number
+    ?? body.called_number
+    ?? body.metadata?.phone_call?.to_number
+    ?? null
 
-  // Dealer resolution also accepts the metadata-nested called number.
-  const dealer = await getDealerByPhone(
-    body.called_number ?? body.metadata?.phone_call?.to_number,
-  )
+  // Multi-tenancy: resolve dealer from the dialed Twilio number.
+  const dealer = await getDealerByPhone(calledNumber)
 
   console.log(
     `[Webhook] post-call conv=${conversationId ?? 'n/a'} sid=${callSid ?? 'n/a'} ` +
     `phone=${callerPhone || 'unknown'} dealer=${dealer.name} dur=${duration}s ` +
     `status=${status} turns=${transcript.length}`,
   )
-  // DEBUG dump: keys + shape, not values, so we don't print PII or
-  // multi-KB transcripts to the log. Lets us confirm against ElevenLabs
-  // payload-format changes without spamming production logs.
+  // DEBUG dump after unwrap: keys + shape, not values, so we don't print
+  // PII or multi-KB transcripts. Reports against the unwrapped rawData
+  // because that's what the rest of the handler operates on.
   console.debug(
-    '[Webhook] post-call body keys:',
-    Object.keys(body),
+    '[Webhook] post-call rawData keys:',
+    Object.keys(rawData),
     'metadata keys:',
-    body.metadata ? Object.keys(body.metadata) : null,
+    rawData.metadata ? Object.keys(rawData.metadata) : null,
     'phone_call keys:',
-    body.metadata?.phone_call ? Object.keys(body.metadata.phone_call) : null,
+    rawData.metadata?.phone_call ? Object.keys(rawData.metadata.phone_call) : null,
   )
 
   const result = await processPostCall({
