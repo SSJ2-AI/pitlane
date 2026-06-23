@@ -5,6 +5,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 're
 import { CallHistory } from '@/components/CallHistory';
 import { CustomerUpsellsPanel } from '@/components/CustomerUpsellsPanel';
 import { OutboundCallButton } from '@/components/OutboundCallButton';
+import { TodaysAppointmentsPanel } from '@/components/TodaysAppointmentsPanel';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
 import { WarrantyBadge } from '@/components/WarrantyBadge';
 import { useVoice } from '@/providers/VoiceProvider';
@@ -197,6 +198,12 @@ export default function DashboardPage() {
                             Customers
                         </Link>
                         <Link
+                            href="/analytics"
+                            className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white"
+                        >
+                            Analytics
+                        </Link>
+                        <Link
                             href="/service-desk"
                             className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white"
                         >
@@ -211,16 +218,16 @@ export default function DashboardPage() {
             </header>
 
             <section className="mx-auto flex max-w-7xl flex-col px-5 py-8 lg:px-8">
-                <div className={hasDashboard ? 'mb-8' : 'flex min-h-[calc(100vh-7rem)] items-center justify-center'}>
-                    <div className={hasDashboard ? 'w-full' : 'w-full max-w-3xl text-center'}>
+                <div className={hasDashboard ? 'mb-8' : 'mb-2'}>
+                    <div className={hasDashboard ? 'w-full' : 'w-full'}>
                         {!hasDashboard && (
                             <div className="mb-8">
                                 <p className="mb-3 text-sm font-semibold uppercase tracking-[0.4em] text-red-400">Customer lookup</p>
                                 <h2 className="text-4xl font-black tracking-tight text-white sm:text-5xl">Identify the next Porsche service guest.</h2>
-                                <p className="mx-auto mt-4 max-w-2xl text-base leading-7 text-zinc-400">Enter a phone number to surface customer history, vehicle alerts, shop load, and the next appointment in one advisor view.</p>
+                                <p className="mt-4 max-w-2xl text-base leading-7 text-zinc-400">Enter a phone number to surface customer history, vehicle alerts, shop load, and the next appointment in one advisor view.</p>
                             </div>
                         )}
-                        <form onSubmit={handleSubmit} className={`rounded-3xl border border-zinc-800 bg-zinc-900/80 p-3 shadow-2xl shadow-black/40 ${hasDashboard ? 'max-w-3xl' : 'mx-auto'}`}>
+                        <form onSubmit={handleSubmit} className={`rounded-3xl border border-zinc-800 bg-zinc-900/80 p-3 shadow-2xl shadow-black/40 ${hasDashboard ? 'max-w-3xl' : 'max-w-3xl'}`}>
                             <div className="flex flex-col gap-3 sm:flex-row">
                                 <label className="sr-only" htmlFor="phone">Customer phone number</label>
                                 <input id="phone" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="647-555-0192" inputMode="tel" className="min-h-16 flex-1 rounded-2xl border border-zinc-800 bg-zinc-950 px-5 text-xl font-semibold text-white outline-none transition placeholder:text-zinc-600 focus:border-red-500 focus:ring-4 focus:ring-red-600/20" />
@@ -229,9 +236,15 @@ export default function DashboardPage() {
                                 </button>
                             </div>
                         </form>
-                        {message && <div className="mt-5 rounded-2xl border border-zinc-800 bg-zinc-900 px-5 py-4 text-sm font-medium text-zinc-300">{message}</div>}
+                        {message && <div className="mt-5 max-w-3xl rounded-2xl border border-zinc-800 bg-zinc-900 px-5 py-4 text-sm font-medium text-zinc-300">{message}</div>}
                     </div>
                 </div>
+
+                {/* Phase 9 task 4: morning-briefing panel. Visible only when no
+                    customer has been pulled into the active dashboard — once
+                    an advisor is mid-conversation we don't want to bury the
+                    customer header under appointment cards. */}
+                {!hasDashboard && <TodaysAppointmentsPanel />}
 
                 {data && activeVehicle && (
                     <div className="space-y-6">
