@@ -134,6 +134,7 @@ function CallsPageInner() {
     const [selectedId, setSelectedId] = useState<string | null>(null);
     const [detail, setDetail] = useState<CallDetailResponse | null>(null);
     const [detailLoading, setDetailLoading] = useState(false);
+    const [detailError, setDetailError] = useState<string | null>(null);
 
     const buildQuery = useCallback(() => {
         const params = new URLSearchParams();
@@ -175,18 +176,33 @@ function CallsPageInner() {
     useEffect(() => {
         if (!selectedId) {
             setDetail(null);
+            setDetailError(null);
             return;
         }
         setDetailLoading(true);
+        setDetailError(null);
         let cancelled = false;
+        // Strict envelope: only call setDetail when we got a 2xx AND the
+        // payload actually carries a `call` row. Otherwise the page used
+        // to dump the API's `{ error: ... }` object into `detail` and
+        // crash on detail.call.customer_id when it tried to render.
         fetch(`/api/calls/${selectedId}`, { cache: 'no-store' })
-            .then((r) => r.json())
-            .then((payload: CallDetailResponse) => {
+            .then(async (r) => {
+                const payload = (await r.json().catch(() => null)) as
+                    | (CallDetailResponse & { error?: string })
+                    | null;
                 if (cancelled) return;
+                if (!r.ok || !payload || !payload.call) {
+                    setDetail(null);
+                    setDetailError(payload?.error ?? `Failed to load call (HTTP ${r.status})`);
+                    return;
+                }
                 setDetail(payload);
             })
-            .catch(() => {
-                if (!cancelled) setDetail(null);
+            .catch((err) => {
+                if (cancelled) return;
+                setDetail(null);
+                setDetailError(err instanceof Error ? err.message : 'Failed to load call');
             })
             .finally(() => {
                 if (!cancelled) setDetailLoading(false);
@@ -474,7 +490,13 @@ function CallsPageInner() {
                         {selectedId && detailLoading && (
                             <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-6 text-sm text-zinc-400">Loading call detail…</section>
                         )}
-                        {selectedId && !detailLoading && detail && <CallDetailPanel detail={detail} />}
+                        {selectedId && !detailLoading && detailError && !detail?.call && (
+                            <section className="rounded-3xl border border-amber-500/40 bg-amber-500/10 p-6 text-sm text-amber-100">
+                                <p className="font-bold">No details available for this call.</p>
+                                <p className="mt-2 text-amber-200/80">{detailError}</p>
+                            </section>
+                        )}
+                        {selectedId && !detailLoading && detail?.call && <CallDetailPanel detail={detail} />}
                     </aside>
                 </div>
             </section>
