@@ -278,7 +278,7 @@ export async function hasSmsConsent(customerId: string): Promise<boolean> {
 }
 
 export interface CdkSyncEnqueue {
-  entity_type: 'appointment' | 'upsell' | 'loaner_request' | 'note'
+  entity_type: 'appointment' | 'upsell' | 'loaner_request' | 'note' | 'vehicle_update'
   entity_id: string
   dealer_id?: string | null
   payload: Record<string, unknown>

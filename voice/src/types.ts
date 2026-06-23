@@ -117,6 +117,12 @@ export interface BookAppointmentRequest extends ToolRequest {
   service_type: string
   preferred_date: string
   preferred_time?: string
+  /**
+   * Phase 10 feature 1: caller-reported current mileage (km). Captured by
+   * Aria when she asks "what's the current mileage on your vehicle?" during
+   * booking. Optional — older agent configs may not send it.
+   */
+  current_mileage?: number
 }
 
 export interface CheckROStatusRequest extends ToolRequest {

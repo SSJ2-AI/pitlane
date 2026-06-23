@@ -162,7 +162,19 @@ router.post('/customer-lookup', (req: Request, res: Response): void => {
 })
 
 // GET /tools/book-appointment — query param version for ElevenLabs tool path
+//
+// Full URL:
+//   GET /tools/book-appointment
+//     ?customer_id=cust_001
+//     &vehicle_id=veh_001a
+//     &service_type=Annual%20Service%20B
+//     &date=2026-07-12
+//     &time=09:30
+//     &call_id=<elevenlabs_conversation_id>
+//     &current_mileage=43000           (Phase 10 feature 1 — optional km)
 router.get('/book-appointment', (req: Request, res: Response) => {
+  const rawMileage = req.query.current_mileage
+  const parsedMileage = typeof rawMileage === 'string' ? Number(rawMileage) : Number.NaN
   void handleBookAppointment(
     {
       customerId: req.query.customer_id as string,
@@ -171,6 +183,7 @@ router.get('/book-appointment', (req: Request, res: Response) => {
       date: (req.query.date as string) ?? (req.query.preferred_date as string),
       time: (req.query.time as string) ?? (req.query.preferred_time as string | undefined),
       callId: req.query.call_id as string | undefined,
+      currentMileage: Number.isFinite(parsedMileage) ? parsedMileage : null,
     },
     res,
   )
@@ -208,6 +221,10 @@ router.post('/book-appointment', (req: Request, res: Response) => {
       date: body.date ?? body.preferred_date,
       time: body.time ?? body.preferred_time,
       callId: body.call_id,
+      currentMileage:
+        typeof body.current_mileage === 'number' && Number.isFinite(body.current_mileage)
+          ? body.current_mileage
+          : null,
     },
     res,
   )
@@ -418,6 +435,15 @@ interface BookAppointmentInput {
   date: string
   time?: string
   callId?: string
+  /**
+   * Phase 10 feature 1. Caller-reported current mileage (km). When set we
+   *   (a) log it,
+   *   (b) update the in-memory vehicle.mileage so subsequent
+   *       customer-lookup calls in this session see the fresh number,
+   *   (c) queue a 'vehicle_update' cdk_sync_queue row so the Phase 3
+   *       worker can write it back to CDK.
+   */
+  currentMileage?: number | null
 }
 
 /**
@@ -453,10 +479,16 @@ async function handleBookAppointment(input: BookAppointmentInput, res: Response)
   const { customerId, vehicleId, serviceType, callId } = input
   const date = input.date
   const time = input.time ?? '09:00'
+  const currentMileage =
+    typeof input.currentMileage === 'number' && Number.isFinite(input.currentMileage) && input.currentMileage > 0
+      ? Math.floor(input.currentMileage)
+      : null
 
   console.log(
     `[Tool] book-appointment customer=${customerId} vehicle=${vehicleId} ` +
-    `service=${serviceType} date=${date} time=${time} call=${callId ?? 'n/a'}`,
+    `service=${serviceType} date=${date} time=${time} ` +
+    `mileage=${currentMileage !== null ? `${currentMileage} km` : 'n/a'} ` +
+    `call=${callId ?? 'n/a'}`,
   )
 
   if (!customerId || !serviceType || !date) {
@@ -492,6 +524,16 @@ async function handleBookAppointment(input: BookAppointmentInput, res: Response)
   }
   customer.upcomingAppointments.push(newAppt)
 
+  // 1b. Phase 10 feature 1: update the in-memory vehicle.mileage with the
+  //     caller-reported number. We only mutate when the new reading is at
+  //     least as high as the stored one — drivers misremember and rolling
+  //     back the odometer would corrupt the next-service prediction.
+  let mileageUpdated = false
+  if (currentMileage !== null && vehicle && currentMileage >= vehicle.mileage) {
+    vehicle.mileage = currentMileage
+    mileageUpdated = true
+  }
+
   // 2. Call store event so the dashboard's live call timeline shows the
   //    booking the moment Aria proposes it.
   if (callId) {
@@ -504,6 +546,7 @@ async function handleBookAppointment(input: BookAppointmentInput, res: Response)
       confirmationNumber,
       advisor,
       duration_est_hours: durationHours,
+      current_mileage: currentMileage,
     })
   }
 
@@ -550,8 +593,42 @@ async function handleBookAppointment(input: BookAppointmentInput, res: Response)
           service_type: serviceType,
           advisor,
           confirmation_number: confirmationNumber,
+          current_mileage: currentMileage,
         },
       })
+    }
+
+    // Phase 10 feature 1: separate vehicle_update queue entry so the
+    // Phase 3 CDK sync worker can push the mileage to Fortellis Vehicles
+    // independently of the appointment. Wrapped in a try/catch because the
+    // 'vehicle_update' enum value comes from migration 0006 — if the
+    // dealer's Supabase hasn't been migrated yet the insert will trip the
+    // entity_type CHECK constraint, and we want to keep the booking call
+    // succeeding anyway. The in-memory mileage update + the appointment
+    // payload still carry the value so nothing is lost.
+    if (mileageUpdated && vehicle && currentMileage !== null) {
+      try {
+        await queueCdkSync({
+          entity_type: 'vehicle_update',
+          entity_id: vehicle.id,
+          dealer_id: dealer.id,
+          payload: {
+            customer_id: customer.id,
+            vehicle_id: vehicle.id,
+            vin: vehicle.vin,
+            field: 'mileage',
+            new_value: currentMileage,
+            reported_at: new Date().toISOString(),
+            source: 'aria_book_appointment',
+            call_log_id: callLogId,
+          },
+        })
+      } catch (err) {
+        console.warn(
+          '[Tool] book-appointment: vehicle_update queue insert failed (likely missing migration 0006):',
+          err instanceof Error ? err.message : err,
+        )
+      }
     }
   }
 
@@ -600,6 +677,8 @@ async function handleBookAppointment(input: BookAppointmentInput, res: Response)
     duration_est_hours: durationHours,
     appointment_id: supabaseAppointmentId,
     vehicle: vehicle ? `${vehicle.year} Porsche ${vehicle.model} ${vehicle.trim ?? ''}`.trim() : 'Your vehicle',
+    current_mileage: currentMileage,
+    mileage_updated: mileageUpdated,
     message:
       `Your ${serviceType} appointment is confirmed for ${date} at ${time} with ${advisor}. ` +
       `Estimated duration: ${durationHours} hours. Confirmation: ${confirmationNumber}.`,
