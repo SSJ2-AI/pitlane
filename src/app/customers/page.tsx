@@ -7,6 +7,21 @@ import type { CustomerListRow } from '@/app/api/customers/route';
 
 type LoyaltyTier = CustomerListRow['loyalty_tier'];
 
+type SortKey =
+    | 'overdue'
+    | 'last_service'
+    | 'lifetime_spend'
+    | 'loaner_requests'
+    | 'last_call';
+
+const SORT_OPTIONS: { value: SortKey; label: string }[] = [
+    { value: 'overdue', label: 'Overdue for service' },
+    { value: 'last_service', label: 'Last service (recent)' },
+    { value: 'lifetime_spend', label: 'Lifetime spend' },
+    { value: 'loaner_requests', label: 'Open loaner requests' },
+    { value: 'last_call', label: 'Last call (recent)' },
+];
+
 const TIER_STYLES: Record<LoyaltyTier, string> = {
     Bronze: 'border-orange-500/40 bg-orange-500/10 text-orange-200',
     Silver: 'border-zinc-500/40 bg-zinc-500/10 text-zinc-200',
@@ -54,6 +69,7 @@ export default function CustomersPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [search, setSearch] = useState('');
+    const [sortBy, setSortBy] = useState<SortKey>('overdue');
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -75,16 +91,23 @@ export default function CustomersPage() {
     }, [load]);
 
     const filtered = useMemo(() => {
-        if (!data) return [];
+        if (!data) return [] as CustomerListRow[];
         const q = search.trim().toLowerCase();
-        if (!q) return data.customers;
-        return data.customers.filter(
-            (c) =>
-                c.name.toLowerCase().includes(q) ||
-                c.phone.includes(q) ||
-                c.email.toLowerCase().includes(q),
-        );
-    }, [data, search]);
+        const base = !q
+            ? data.customers
+            : data.customers.filter(
+                  (c) =>
+                      c.name.toLowerCase().includes(q) ||
+                      c.phone.includes(q) ||
+                      c.email.toLowerCase().includes(q),
+              );
+        return sortCustomers(base, sortBy);
+    }, [data, search, sortBy]);
+
+    const overdueCount = useMemo(
+        () => (data?.customers ?? []).filter((c) => c.is_service_overdue).length,
+        [data],
+    );
 
     const totalSpend = useMemo(
         () => (data?.customers ?? []).reduce((sum, c) => sum + c.lifetime_spend, 0),
@@ -107,6 +130,7 @@ export default function CustomersPage() {
                         <Link href="/dashboard" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Dashboard</Link>
                         <Link href="/calls" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Calls</Link>
                         <span className="inline-flex items-center rounded-full border border-red-500/40 bg-red-600/15 px-4 py-2 text-sm font-semibold text-red-200">Customers</span>
+                        <Link href="/analytics" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Analytics</Link>
                         <Link href="/service-desk" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Service desk</Link>
                     </nav>
                 </div>
@@ -130,15 +154,9 @@ export default function CustomersPage() {
                         accent="emerald"
                     />
                     <StatCard
-                        label="Persistence"
-                        value={
-                            data?.persistence === 'supabase'
-                                ? 'Supabase + mock'
-                                : data?.persistence === 'mock'
-                                ? 'Mock only'
-                                : '—'
-                        }
-                        accent={data?.persistence === 'supabase' ? 'emerald' : undefined}
+                        label="Service overdue"
+                        value={data ? String(overdueCount) : '—'}
+                        accent={overdueCount > 0 ? 'amber' : undefined}
                     />
                     <StatCard
                         label="Dealer"
@@ -153,9 +171,23 @@ export default function CustomersPage() {
                         placeholder="Search by name, phone, or email…"
                         className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-5 py-3 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-red-500 sm:max-w-md"
                     />
-                    <span className="rounded-full border border-zinc-700 bg-zinc-950 px-3 py-1 text-xs font-bold uppercase tracking-[0.18em] text-zinc-400">
-                        {filtered.length} of {data?.customers.length ?? 0} matching
-                    </span>
+                    <div className="flex flex-wrap items-center gap-3">
+                        <span className="rounded-full border border-zinc-700 bg-zinc-950 px-3 py-1 text-xs font-bold uppercase tracking-[0.18em] text-zinc-400">
+                            {filtered.length} of {data?.customers.length ?? 0} matching
+                        </span>
+                        <label className="flex items-center gap-2">
+                            <span className="text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500">Sort by</span>
+                            <select
+                                value={sortBy}
+                                onChange={(e) => setSortBy(e.target.value as SortKey)}
+                                className="rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-white outline-none focus:border-red-500"
+                            >
+                                {SORT_OPTIONS.map((opt) => (
+                                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                ))}
+                            </select>
+                        </label>
+                    </div>
                 </div>
 
                 {error && (
@@ -202,7 +234,19 @@ export default function CustomersPage() {
                                                     href={`/customers/${encodeURIComponent(c.id)}`}
                                                     className="block min-w-0"
                                                 >
-                                                    <p className="truncate text-sm font-black text-white transition hover:text-red-200">{c.name}</p>
+                                                    <div className="flex flex-wrap items-center gap-2">
+                                                        <p className="truncate text-sm font-black text-white transition hover:text-red-200">{c.name}</p>
+                                                        {c.is_service_overdue && (
+                                                            <span className="rounded-full border border-orange-500/50 bg-orange-500/15 px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.18em] text-orange-200">
+                                                                Service overdue
+                                                            </span>
+                                                        )}
+                                                        {c.has_open_loaner_request && (
+                                                            <span className="rounded-full border border-red-500/40 bg-red-500/15 px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.18em] text-red-200">
+                                                                Loaner requested
+                                                            </span>
+                                                        )}
+                                                    </div>
                                                     <p className="mt-0.5 truncate text-xs text-zinc-500">{c.email}</p>
                                                 </Link>
                                             </td>
@@ -273,11 +317,66 @@ export default function CustomersPage() {
     );
 }
 
-function StatCard({ label, value, accent }: { label: string; value: string; accent?: 'emerald' }) {
+function sortCustomers(rows: CustomerListRow[], sortBy: SortKey): CustomerListRow[] {
+    const copy = [...rows];
+    switch (sortBy) {
+        case 'overdue':
+            // Overdue customers first, then by oldest last_service_date so the
+            // "most stale" advisor-action customer floats to the top.
+            return copy.sort((a, b) => {
+                if (a.is_service_overdue !== b.is_service_overdue) return a.is_service_overdue ? -1 : 1;
+                return compareIsoDateAsc(a.last_service_date, b.last_service_date);
+            });
+        case 'last_service':
+            // Most recent service first; nulls (never serviced) sink to bottom.
+            return copy.sort((a, b) => compareIsoDateDesc(a.last_service_date, b.last_service_date));
+        case 'lifetime_spend':
+            return copy.sort((a, b) => b.lifetime_spend - a.lifetime_spend);
+        case 'loaner_requests':
+            // Loaner-flagged first, secondary by last_call recency so the same
+            // customer doesn't sit at the top forever once handled.
+            return copy.sort((a, b) => {
+                if (a.has_open_loaner_request !== b.has_open_loaner_request) return a.has_open_loaner_request ? -1 : 1;
+                return compareIsoDateDesc(a.last_call?.date ?? null, b.last_call?.date ?? null);
+            });
+        case 'last_call':
+            return copy.sort((a, b) => compareIsoDateDesc(a.last_call?.date ?? null, b.last_call?.date ?? null));
+        default:
+            return copy;
+    }
+}
+
+// `null` sorts after real dates in both directions — a customer with no
+// service / no call history shouldn't be presented as more or less recent
+// than someone with a real date.
+function compareIsoDateDesc(a: string | null, b: string | null) {
+    if (a === b) return 0;
+    if (!a) return 1;
+    if (!b) return -1;
+    return a < b ? 1 : -1;
+}
+function compareIsoDateAsc(a: string | null, b: string | null) {
+    if (a === b) return 0;
+    if (!a) return 1;
+    if (!b) return -1;
+    return a < b ? -1 : 1;
+}
+
+function StatCard({ label, value, accent }: { label: string; value: string; accent?: 'emerald' | 'amber' }) {
     return (
         <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
             <p className="text-xs font-semibold uppercase tracking-[0.24em] text-zinc-500">{label}</p>
-            <p className={`mt-2 text-2xl font-black ${accent === 'emerald' ? 'text-emerald-300' : 'text-white'}`}>{value}</p>
+            <p
+                className={`mt-2 text-2xl font-black ${
+                    accent === 'emerald'
+                        ? 'text-emerald-300'
+                        : accent === 'amber'
+                        ? 'text-amber-300'
+                        : 'text-white'
+                }`}
+            >
+                {value}
+            </p>
         </div>
     );
 }
