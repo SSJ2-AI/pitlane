@@ -56,6 +56,10 @@ export interface TodaysAppointmentRow {
         outcome: CallSummary['outcome'] | null;
     } | null;
     upsells_to_surface: UpsellFlag[];
+    /** Phase 10 task 2 — true when any recent call for this customer flagged
+     *  summary.loaner_needed. Drives the yellow 'Loaner needed' badge on
+     *  the dashboard's Today panel. */
+    has_loaner_request: boolean;
 }
 
 interface ResponseShape {
@@ -86,6 +90,16 @@ function shape(appt: MockAppointment): TodaysAppointmentRow {
     const recentUpsellCall = MOCK_CALLS
         .filter((c) => c.customer_id === appt.customer_id && (c.summary?.upsells_flagged?.length ?? 0) > 0)
         .sort((a, b) => (a.started_at < b.started_at ? 1 : -1))[0];
+
+    // Loaner-needed flag: true when EITHER the source call asked for a
+    // loaner OR any recent call for this customer did. The dashboard
+    // surfaces this as a yellow badge so the advisor knows to clear it
+    // with the service desk before the appointment.
+    const hasLoanerRequest =
+        sourceCall?.summary?.loaner_needed === true ||
+        MOCK_CALLS.some(
+            (c) => c.customer_id === appt.customer_id && c.summary?.loaner_needed === true,
+        );
 
     return {
         id: appt.id,
@@ -119,6 +133,7 @@ function shape(appt: MockAppointment): TodaysAppointmentRow {
               }
             : null,
         upsells_to_surface: recentUpsellCall?.summary?.upsells_flagged ?? [],
+        has_loaner_request: hasLoanerRequest,
     };
 }
 

@@ -146,4 +146,15 @@ export interface LoanerRequestRow {
     resolved_by: string | null;
     resolved_at: string | null;
     created_at: string;
+    /** Phase 10 task 2 — date the loaner is collected. Added in migration 0008. */
+    pickup_date?: string | null;
+    /** Phase 10 task 2 — assigned loaner vehicle (free text). NULL = standard loaner pool. */
+    loaner_vehicle?: string | null;
+}
+
+/** Dashboard-side enrichment of LoanerRequestRow with customer + vehicle context. */
+export interface LoanerRequestRowEnriched extends LoanerRequestRow {
+    customer_name: string | null;
+    appointment_date: string | null;
+    vehicle_label: string | null;
 }

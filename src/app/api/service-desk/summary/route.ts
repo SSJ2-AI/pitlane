@@ -1,12 +1,46 @@
 // @ts-nocheck
 import { NextResponse } from 'next/server';
-import { getSupabase, type AppointmentRow, type LoanerRequestRow, type UpsellRow } from '@/lib/supabase';
+import {
+    getSupabase,
+    type AppointmentRow,
+    type LoanerRequestRow,
+    type LoanerRequestRowEnriched,
+    type UpsellRow,
+} from '@/lib/supabase';
 import { resolveDealerForRequest } from '@/lib/dealer';
+import { getCustomerName, getVehiclesForCustomer } from '@/lib/mock-customers';
 
 export const dynamic = 'force-dynamic';
 
 function todayIso(): string {
     return new Date().toISOString().slice(0, 10);
+}
+
+/**
+ * Stamp customer_name + vehicle_label + appointment_date onto each loaner row
+ * so the /service-desk UI doesn't have to do its own joins. Uses MOCK_CUSTOMERS
+ * for name resolution — when Phase 6's CDK pull replaces the mock dataset this
+ * helper switches to the Supabase customers table.
+ */
+function enrichLoaners(
+    rows: LoanerRequestRow[],
+    arrivals: AppointmentRow[],
+): LoanerRequestRowEnriched[] {
+    return rows.map((row) => {
+        const appt = row.appointment_id
+            ? arrivals.find((a) => a.id === row.appointment_id) ?? null
+            : null;
+        const primaryVehicle = getVehiclesForCustomer(row.customer_id)[0];
+        const vehicleLabel = primaryVehicle
+            ? `${primaryVehicle.year} ${primaryVehicle.make} ${primaryVehicle.model}`
+            : row.loaner_preferred ?? null;
+        return {
+            ...row,
+            customer_name: getCustomerName(row.customer_id),
+            appointment_date: appt?.date ?? row.requested_date ?? null,
+            vehicle_label: vehicleLabel,
+        };
+    });
 }
 
 function getMockSummary(today: string) {
@@ -16,7 +50,8 @@ function getMockSummary(today: string) {
         { id: 'appt_003', customer_id: 'cust_003', dealer_id: 'dealer_porsche_toronto', vehicle_id: 'veh_003a', date: today, time: '14:00', service_type: 'Brake Fluid + 60K Service', advisor: 'Marco Alvarez', duration_est_hours: 4.0, status: 'scheduled', confirmation_number: 'PCA-003', cdk_id: null, call_log_id: 'call_003', created_at: new Date().toISOString() },
     ];
     const loaner_queue: LoanerRequestRow[] = [
-        { id: 'loan_001', call_log_id: 'call_003', appointment_id: 'appt_003', customer_id: 'cust_003', dealer_id: 'dealer_porsche_toronto', requested_date: today, loaner_preferred: 'SUV — Cayenne or Macan', status: 'pending', notes: 'Customer dropping off at 2 PM', resolved_by: null, resolved_at: null, created_at: new Date().toISOString() },
+        { id: 'loan_001', call_log_id: 'call_003', appointment_id: 'appt_003', customer_id: 'cust_003', dealer_id: 'dealer_porsche_toronto', requested_date: today, loaner_preferred: 'SUV — Cayenne or Macan', status: 'pending', notes: 'Customer dropping off at 2 PM', resolved_by: null, resolved_at: null, created_at: new Date().toISOString(), pickup_date: null, loaner_vehicle: null },
+        { id: 'loan_002', call_log_id: 'call_007', appointment_id: null, customer_id: 'cust_002', dealer_id: 'dealer_porsche_toronto', requested_date: today, loaner_preferred: 'Taycan', status: 'approved', notes: 'BMS software update — needs car for ~2h', resolved_by: 'service_desk', resolved_at: new Date(Date.now() - 1_800_000).toISOString(), created_at: new Date(Date.now() - 3_600_000).toISOString(), pickup_date: today, loaner_vehicle: 'Cayenne — STD-001' },
     ];
     const upsells: UpsellRow[] = [
         { id: 'ups_001', call_log_id: 'call_001', customer_id: 'cust_001', dealer_id: 'dealer_porsche_toronto', vehicle_id: 'veh_001a', upsell_type: 'brake_replacement', description: 'Rear Brake Replacement — previously declined Nov 2025', value_est: 875, status: 'pending', created_at: new Date(Date.now() - 86400000 * 3).toISOString() },
@@ -24,7 +59,19 @@ function getMockSummary(today: string) {
         { id: 'ups_003', call_log_id: 'call_004', customer_id: 'cust_004', dealer_id: 'dealer_porsche_toronto', vehicle_id: 'veh_004a', upsell_type: 'software_update', description: 'Annual Taycan Software Update Package', value_est: 420, status: 'pending', created_at: new Date(Date.now() - 86400000 * 2).toISOString() },
     ];
     const upsellValue = upsells.reduce((s, u) => s + (u.value_est ?? 0), 0);
-    return { persistence: 'supabase' as const, today, arrivals, loaner_queue, upsells, stats: { arrivals_count: arrivals.length, loaner_pending: loaner_queue.length, upsell_count: upsells.length, upsell_value: upsellValue } };
+    return {
+        persistence: 'supabase' as const,
+        today,
+        arrivals,
+        loaner_queue: enrichLoaners(loaner_queue, arrivals),
+        upsells,
+        stats: {
+            arrivals_count: arrivals.length,
+            loaner_pending: loaner_queue.filter((l) => l.status === 'pending').length,
+            upsell_count: upsells.length,
+            upsell_value: upsellValue,
+        },
+    };
 }
 
 export async function GET(request: Request) {
@@ -49,5 +96,12 @@ export async function GET(request: Request) {
     const loaners = (loanersRes.data ?? []) as LoanerRequestRow[];
     const upsells = (upsellsRes.data ?? []) as UpsellRow[];
     const upsellValue = upsells.reduce((sum, u) => sum + (u.value_est ?? 0), 0);
-    return NextResponse.json({ persistence: 'supabase' as const, today, arrivals, loaner_queue: loaners, upsells, stats: { arrivals_count: arrivals.length, loaner_pending: loaners.length, upsell_count: upsells.length, upsell_value: upsellValue } });
+    return NextResponse.json({
+        persistence: 'supabase' as const,
+        today,
+        arrivals,
+        loaner_queue: enrichLoaners(loaners, arrivals),
+        upsells,
+        stats: { arrivals_count: arrivals.length, loaner_pending: loaners.length, upsell_count: upsells.length, upsell_value: upsellValue },
+    });
 }

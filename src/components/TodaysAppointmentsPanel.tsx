@@ -159,6 +159,12 @@ export function TodaysAppointmentsPanel() {
                                 </p>
                             )}
 
+                            {appt.has_loaner_request && (
+                                <span className="w-fit rounded-full border border-yellow-500/50 bg-yellow-500/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] text-yellow-100">
+                                    Loaner needed
+                                </span>
+                            )}
+
                             {appt.upsells_to_surface.length > 0 && (
                                 <div className="flex flex-wrap items-center gap-2">
                                     <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] text-amber-200">

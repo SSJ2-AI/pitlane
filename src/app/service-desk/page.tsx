@@ -2,15 +2,16 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
-import type { AppointmentRow, LoanerRequestRow, UpsellRow } from '@/lib/supabase';
+import type { AppointmentRow, LoanerRequestRowEnriched, UpsellRow } from '@/lib/supabase';
 import { AdminNavLink } from '@/components/AdminNavLink';
+import { ThemeToggle } from '@/components/ThemeToggle';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
 
 interface SummaryResponse {
     persistence: 'supabase' | 'none';
     today: string;
     arrivals: AppointmentRow[];
-    loaner_queue: LoanerRequestRow[];
+    loaner_queue: LoanerRequestRowEnriched[];
     upsells: UpsellRow[];
     stats: {
         arrivals_count: number;
@@ -18,6 +19,22 @@ interface SummaryResponse {
         upsell_count: number;
         upsell_value: number;
     };
+}
+
+const LOANER_STATUS_PILL: Record<string, { label: string; cls: string }> = {
+    pending: { label: 'Pending approval', cls: 'border-orange-500/50 bg-orange-500/15 text-orange-200' },
+    approved: { label: 'Approved', cls: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200' },
+    declined: { label: 'Denied', cls: 'border-red-500/40 bg-red-500/10 text-red-200' },
+    denied: { label: 'Denied', cls: 'border-red-500/40 bg-red-500/10 text-red-200' },
+    fulfilled: { label: 'Fulfilled', cls: 'border-sky-500/40 bg-sky-500/10 text-sky-200' },
+};
+
+function todayIsoLocal(): string {
+    const d = new Date();
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
 }
 
 const REFRESH_INTERVAL_MS = 15_000;
@@ -75,13 +92,27 @@ export default function ServiceDeskPage() {
         return () => clearInterval(interval);
     }, [load]);
 
-    async function patchLoaner(id: string, status: 'approved' | 'declined') {
+    // Phase 10 task 2: pickup-date picker per row, kept local to the page so
+    // each pending card can have its own input without spamming Supabase
+    // until the advisor hits Approve.
+    const [pickupDates, setPickupDates] = useState<Record<string, string>>({});
+
+    function setPickup(id: string, value: string) {
+        setPickupDates((current) => ({ ...current, [id]: value }));
+    }
+
+    async function patchLoaner(id: string, status: 'approved' | 'denied', extra?: { pickup_date?: string | null; loaner_vehicle?: string | null }) {
         setActionFor(id);
         try {
             const response = await fetch(`/api/loaner-requests/${id}`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ status, resolved_by: 'service_desk' }),
+                body: JSON.stringify({
+                    status,
+                    resolved_by: 'service_desk',
+                    pickup_date: extra?.pickup_date ?? null,
+                    loaner_vehicle: extra?.loaner_vehicle ?? null,
+                }),
             });
             if (!response.ok) {
                 const body = await response.json().catch(() => ({}));
@@ -129,6 +160,7 @@ export default function ServiceDeskPage() {
                         </div>
                     </Link>
                     <nav className="flex flex-wrap items-center gap-3">
+                        <ThemeToggle />
                         <VoiceStatusDot />
                         <Link href="/dashboard" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Dashboard</Link>
                         <Link href="/calls" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Calls</Link>
@@ -206,49 +238,119 @@ export default function ServiceDeskPage() {
                     <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-5">
                         <header className="mb-4 flex items-end justify-between">
                             <div>
-                                <p className="text-xs font-semibold uppercase tracking-[0.28em] text-zinc-500">Loaner queue</p>
-                                <h3 className="mt-2 text-xl font-black text-white">Awaiting confirmation</h3>
+                                <p className="text-xs font-semibold uppercase tracking-[0.28em] text-zinc-500">Loaner requests</p>
+                                <h3 className="mt-2 text-xl font-black text-white">Approve a pickup</h3>
                             </div>
                             <span className="rounded-full border border-red-500/40 bg-red-600/10 px-3 py-1 text-xs font-bold uppercase tracking-[0.18em] text-red-200">
-                                {data?.loaner_queue.length ?? 0} pending
+                                {stats?.loaner_pending ?? 0} pending
                             </span>
                         </header>
                         {loading && !data && <EmptyState label="Loading loaner requests…" />}
-                        {!loading && (data?.loaner_queue.length ?? 0) === 0 && <EmptyState label="No loaner requests awaiting confirmation." />}
+                        {!loading && (data?.loaner_queue.length ?? 0) === 0 && <EmptyState label="No loaner requests today." />}
                         <ul className="space-y-3">
-                            {data?.loaner_queue.map((req) => (
-                                <li key={req.id} className="rounded-2xl border border-red-500/30 bg-red-500/5 p-4">
-                                    <div className="flex items-start justify-between gap-3">
-                                        <div className="min-w-0">
-                                            <p className="text-sm font-black text-white">{req.loaner_preferred ?? 'Any loaner'}</p>
-                                            <p className="text-xs text-red-200">
-                                                Customer {req.customer_id}
-                                                {req.requested_date ? ` · ${req.requested_date}` : ''}
-                                            </p>
-                                            {req.notes && <p className="mt-2 text-xs text-zinc-300">{req.notes}</p>}
+                            {data?.loaner_queue.map((req) => {
+                                const pill = LOANER_STATUS_PILL[req.status] ?? LOANER_STATUS_PILL.pending;
+                                const isPending = req.status === 'pending';
+                                const cardBorder = isPending
+                                    ? 'border-orange-500/40 bg-orange-500/5'
+                                    : req.status === 'approved'
+                                    ? 'border-emerald-500/30 bg-emerald-500/5'
+                                    : req.status === 'declined' || req.status === 'denied'
+                                    ? 'border-red-500/30 bg-red-500/5'
+                                    : 'border-zinc-800 bg-zinc-950';
+                                const pickupVal = pickupDates[req.id] ?? req.pickup_date ?? req.requested_date ?? todayIsoLocal();
+                                return (
+                                    <li key={req.id} className={`rounded-2xl border p-4 ${cardBorder}`}>
+                                        <div className="flex items-start justify-between gap-3">
+                                            <div className="min-w-0">
+                                                <p className="text-sm font-black text-white">
+                                                    {req.customer_name ?? `Customer ${req.customer_id}`}
+                                                </p>
+                                                {req.vehicle_label && (
+                                                    <p className="text-xs text-zinc-300">{req.vehicle_label}</p>
+                                                )}
+                                                <p className="mt-1 text-[11px] text-zinc-400">
+                                                    Requested{' '}
+                                                    {req.appointment_date
+                                                        ? `for ${req.appointment_date}`
+                                                        : req.requested_date
+                                                        ? `for ${req.requested_date}`
+                                                        : 'date TBD'}
+                                                    {req.loaner_preferred ? ` · ${req.loaner_preferred}` : ''}
+                                                </p>
+                                                {req.notes && <p className="mt-2 text-xs text-zinc-300">{req.notes}</p>}
+                                            </div>
+                                            <div className="flex flex-col items-end gap-1">
+                                                <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] ${pill.cls}`}>
+                                                    {pill.label}
+                                                </span>
+                                                <span className="text-[10px] uppercase tracking-[0.22em] text-zinc-500">{formatRelative(req.created_at)}</span>
+                                            </div>
                                         </div>
-                                        <p className="text-[10px] uppercase tracking-[0.22em] text-zinc-500">{formatRelative(req.created_at)}</p>
-                                    </div>
-                                    <div className="mt-3 flex gap-2">
-                                        <button
-                                            type="button"
-                                            disabled={actionFor === req.id}
-                                            onClick={() => void patchLoaner(req.id, 'approved')}
-                                            className="flex-1 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.18em] text-emerald-200 transition hover:border-emerald-400 hover:bg-emerald-500/20 disabled:opacity-50"
-                                        >
-                                            Approve
-                                        </button>
-                                        <button
-                                            type="button"
-                                            disabled={actionFor === req.id}
-                                            onClick={() => void patchLoaner(req.id, 'declined')}
-                                            className="flex-1 rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs font-bold uppercase tracking-[0.18em] text-zinc-300 transition hover:border-zinc-500 hover:text-white disabled:opacity-50"
-                                        >
-                                            Decline
-                                        </button>
-                                    </div>
-                                </li>
-                            ))}
+
+                                        {/* Approved / denied summary block */}
+                                        {!isPending && (
+                                            <div className="mt-3 rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-300">
+                                                {req.status === 'approved' ? (
+                                                    <>
+                                                        <p>
+                                                            <span className="font-bold text-emerald-200">Pickup:</span>{' '}
+                                                            {req.pickup_date ?? '—'}
+                                                        </p>
+                                                        <p className="mt-1">
+                                                            <span className="font-bold text-emerald-200">Assigned:</span>{' '}
+                                                            {req.loaner_vehicle ?? 'Standard loaner — to be assigned'}
+                                                        </p>
+                                                    </>
+                                                ) : (
+                                                    <p className="font-bold text-red-200">Request denied · {formatRelative(req.resolved_at ?? req.created_at)}</p>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {/* Approval controls (only when pending) */}
+                                        {isPending && (
+                                            <div className="mt-3 space-y-2">
+                                                <label className="flex items-center gap-2 text-xs text-zinc-400">
+                                                    <span className="font-bold uppercase tracking-[0.18em] text-zinc-500">Pickup</span>
+                                                    <input
+                                                        type="date"
+                                                        value={pickupVal}
+                                                        onChange={(e) => setPickup(req.id, e.target.value)}
+                                                        className="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-xs text-white outline-none focus:border-red-500"
+                                                    />
+                                                </label>
+                                                <p className="text-[11px] italic text-zinc-500">
+                                                    Standard loaner — to be assigned
+                                                </p>
+                                                <div className="flex gap-2">
+                                                    <button
+                                                        type="button"
+                                                        disabled={actionFor === req.id}
+                                                        onClick={() =>
+                                                            void patchLoaner(req.id, 'approved', {
+                                                                pickup_date: pickupVal,
+                                                                loaner_vehicle: null,
+                                                            })
+                                                        }
+                                                        className="flex-1 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.18em] text-emerald-200 transition hover:border-emerald-400 hover:bg-emerald-500/20 disabled:opacity-50"
+                                                    >
+                                                        Approve loaner
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        disabled={actionFor === req.id}
+                                                        onClick={() => void patchLoaner(req.id, 'denied')}
+                                                        className="flex-1 rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs font-bold uppercase tracking-[0.18em] text-zinc-300 transition hover:border-red-500 hover:text-white disabled:opacity-50"
+                                                    >
+                                                        Deny
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </li>
+                                );
+                            })}
                         </ul>
                     </section>
 
