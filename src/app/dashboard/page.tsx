@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AdminNavLink } from '@/components/AdminNavLink';
 import { CallHistory } from '@/components/CallHistory';
 import { CustomerUpsellsPanel } from '@/components/CustomerUpsellsPanel';
 import { OutboundCallButton } from '@/components/OutboundCallButton';
@@ -209,6 +210,7 @@ export default function DashboardPage() {
                         >
                             Service desk
                         </Link>
+                        <AdminNavLink />
                         <div className="inline-flex w-fit items-center rounded-full border border-red-500/40 bg-red-600/15 px-4 py-2 text-sm font-semibold text-red-200">
                             <span className="mr-2 h-2 w-2 rounded-full bg-red-500 shadow-[0_0_18px_rgba(220,38,38,0.9)]" />
                             Service Advisor

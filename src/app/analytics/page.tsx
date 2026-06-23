@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { AdminNavLink } from '@/components/AdminNavLink';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
 import type { CallLogRow, CallOutcome, CallSentiment } from '@/lib/supabase';
 
@@ -168,6 +169,7 @@ export default function AnalyticsPage() {
                         <Link href="/customers" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Customers</Link>
                         <span className="inline-flex items-center rounded-full border border-red-500/40 bg-red-600/15 px-4 py-2 text-sm font-semibold text-red-200">Analytics</span>
                         <Link href="/service-desk" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Service desk</Link>
+                        <AdminNavLink />
                     </nav>
                 </div>
             </header>

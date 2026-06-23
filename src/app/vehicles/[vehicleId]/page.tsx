@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import type { MockRecall, MockRepairOrder, MockVehicle, VehicleSource } from '@/lib/mock-vehicles';
 import type { NextServicePrediction } from '@/lib/next-service';
+import { AdminNavLink } from '@/components/AdminNavLink';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
 
 interface VehicleResponse {
@@ -123,6 +124,7 @@ export default function VehicleDetailPage() {
                         <Link href="/customers" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Customers</Link>
                         <Link href="/analytics" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Analytics</Link>
                         <Link href="/service-desk" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Service desk</Link>
+                        <AdminNavLink />
                         <span className="inline-flex items-center rounded-full border border-red-500/40 bg-red-600/15 px-4 py-2 text-sm font-semibold text-red-200">Vehicle</span>
                     </nav>
                 </div>
