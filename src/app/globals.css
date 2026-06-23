@@ -6,7 +6,79 @@
   box-sizing: border-box;
 }
 
+/* ─── Default (dark) theme ────────────────────────────────────────────────── */
+
 body {
   background-color: #09090b;
   color: #f4f4f5;
+}
+
+/* ─── Phase 10 task 3 — Light theme overrides ──────────────────────────────
+ *
+ * The Tailwind classes baked into the pages are dark-only (e.g. `bg-zinc-900`,
+ * `text-white`). Rather than refactor every component to use `dark:` prefixes
+ * (which would touch dozens of files), light mode is delivered by overriding
+ * the most common dark-theme utility classes when <html> carries the `light`
+ * class. Red accents stay because the rules don't target red/amber/emerald
+ * classes — those keep their dark-mode color for brand consistency, as
+ * specified.
+ *
+ * Specificity uses `html.light .class` rather than `.light .class` so the
+ * selector beats Tailwind's single-class utilities deterministically. The
+ * !important is unavoidable because Tailwind utilities don't expose CSS
+ * variables for these colors at this version, and we need to win against
+ * generated styles.
+ */
+
+html.light body {
+  background-color: #ffffff;
+  color: #18181b;
+}
+
+/* Backgrounds */
+html.light .bg-\[\#09090b\] { background-color: #ffffff !important; }
+html.light .bg-zinc-900 { background-color: #fafafa !important; }
+html.light .bg-zinc-950 { background-color: #ffffff !important; }
+html.light .bg-zinc-900\/80 { background-color: rgba(250, 250, 250, 0.92) !important; }
+html.light .bg-zinc-950\/60 { background-color: rgba(244, 244, 245, 0.7) !important; }
+html.light .bg-zinc-950\/90 { background-color: rgba(255, 255, 255, 0.9) !important; }
+html.light .bg-zinc-950\/70 { background-color: rgba(244, 244, 245, 0.7) !important; }
+html.light .bg-zinc-950\/40 { background-color: rgba(244, 244, 245, 0.5) !important; }
+html.light .bg-zinc-900\/90 { background-color: rgba(250, 250, 250, 0.92) !important; }
+
+/* Text */
+html.light .text-white { color: #18181b !important; }
+html.light .text-zinc-50 { color: #18181b !important; }
+html.light .text-zinc-100 { color: #27272a !important; }
+html.light .text-zinc-200 { color: #3f3f46 !important; }
+html.light .text-zinc-300 { color: #52525b !important; }
+html.light .text-zinc-400 { color: #71717a !important; }
+html.light .text-zinc-500 { color: #71717a !important; }
+
+/* Borders */
+html.light .border-zinc-700 { border-color: #d4d4d8 !important; }
+html.light .border-zinc-800 { border-color: #e4e4e7 !important; }
+html.light .border-zinc-800\/60 { border-color: rgba(228, 228, 231, 0.7) !important; }
+html.light .border-zinc-800\/80 { border-color: rgba(228, 228, 231, 0.85) !important; }
+html.light .border-dashed.border-zinc-800 { border-color: #e4e4e7 !important; }
+
+/* Hover-state borders that flip to red stay red — we only override the
+   neutral resting state above. The `hover:border-red-500` rule already
+   uses a red token that we leave untouched. */
+
+/* Shadows — soften the heavy dark drop shadows */
+html.light .shadow-2xl,
+html.light .shadow-xl,
+html.light .shadow-lg {
+  --tw-shadow-color: rgba(24, 24, 27, 0.08);
+}
+html.light .shadow-black\/40,
+html.light .shadow-black\/50,
+html.light .shadow-black\/25 {
+  --tw-shadow-color: rgba(24, 24, 27, 0.08);
+}
+
+/* Smooth transition when switching themes */
+html, body {
+  transition: background-color 180ms ease, color 180ms ease;
 }

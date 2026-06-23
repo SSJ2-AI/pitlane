@@ -10,6 +10,7 @@ import {
     useMemo,
     useState,
 } from 'react';
+import { ThemeToggle } from '@/components/ThemeToggle';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
 import type { DealerListRow } from '@/lib/mock-dealers';
 
@@ -115,6 +116,7 @@ function AdminDealersInner() {
                         </div>
                     </Link>
                     <nav className="flex flex-wrap items-center gap-3">
+                        <ThemeToggle />
                         <VoiceStatusDot />
                         <Link href={`/dashboard${adminQuery}`} className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Dashboard</Link>
                         <Link href={`/calls${adminQuery}`} className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Calls</Link>

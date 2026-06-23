@@ -6,6 +6,7 @@ import { AdminNavLink } from '@/components/AdminNavLink';
 import { CallHistory } from '@/components/CallHistory';
 import { CustomerUpsellsPanel } from '@/components/CustomerUpsellsPanel';
 import { OutboundCallButton } from '@/components/OutboundCallButton';
+import { ThemeToggle } from '@/components/ThemeToggle';
 import { TodaysAppointmentsPanel } from '@/components/TodaysAppointmentsPanel';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
 import { WarrantyBadge } from '@/components/WarrantyBadge';
@@ -185,6 +186,7 @@ export default function DashboardPage() {
                         </div>
                     </div>
                     <div className="flex flex-wrap items-center gap-3">
+                        <ThemeToggle />
                         <VoiceStatusDot />
                         <Link
                             href="/calls"

@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { MockRecall, MockRepairOrder, MockVehicle, VehicleSource } from '@/lib/mock-vehicles';
 import type { NextServicePrediction } from '@/lib/next-service';
 import { AdminNavLink } from '@/components/AdminNavLink';
+import { ThemeToggle } from '@/components/ThemeToggle';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
 
 interface VehicleResponse {
@@ -118,6 +119,7 @@ export default function VehicleDetailPage() {
                         </div>
                     </Link>
                     <nav className="flex flex-wrap items-center gap-3">
+                        <ThemeToggle />
                         <VoiceStatusDot />
                         <Link href="/dashboard" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Dashboard</Link>
                         <Link href="/calls" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Calls</Link>
