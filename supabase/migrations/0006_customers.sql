@@ -1,22 +1,31 @@
--- ─── PitLane Phase 8b: customers index ─────────────────────────────────────
+-- ─── PitLane Phase 8b: customers index (CDK-first read policy) ────────────
 --
--- A LIGHTWEIGHT local index of callers we've talked to. The intent is NOT to
--- duplicate CDK's customer-of-record data — Phase 10's CDK-first strategy
--- treats CDK as the source of truth for contact info, vehicles, RO history.
+-- This is a METADATA-ONLY local index of phone numbers Aria has talked to.
+-- CDK is the source of truth for customer contact info (name, email,
+-- preferred language, address) AND for vehicles / ROs / appointments /
+-- warranty data. This table exists purely so PitLane can:
 --
--- This table exists so:
---   1. Aria can auto-create a row when a brand-new phone number calls in,
---      stamp is_new_customer=true on the conversation, and ask for the
---      caller's name without losing the phone number when the call drops.
---   2. The dashboard /customers page can show every caller PitLane has ever
---      interacted with, including ones who never made it into CDK.
---   3. When CDK lookup later finds the same phone, we link cdk_customer_id
---      onto this row instead of duplicating the customer record.
+--   1. Auto-create a row when a brand-new phone calls in — stamp
+--      is_new_customer=true on the conversation, ask Aria to collect the
+--      caller's name, and keep the phone number around even if the call
+--      drops before CDK enrolment.
+--   2. Show every caller PitLane has interacted with on the /customers
+--      page, including ones who haven't made it into CDK yet.
+--   3. Anchor Aria-generated artifacts (call_logs, callback_requests,
+--      loaner_requests) to a stable customer reference when no
+--      cdk_customer_id exists yet.
 --
--- The columns kept here are deliberately minimal: phone, optional name,
--- timestamps, dealer linkage. Vehicle / RO / appointment data continue to
--- live in CDK (or the existing call_logs / appointments tables for
--- Aria-generated rows).
+-- READ POLICY (enforced in src/app/api/customers + customers/by-phone):
+--   - CDK first via lookupCustomerByPhone. When CDK has the record, the
+--     dashboard displays CDK's name / email / preferred language. The
+--     local row is NOT surfaced in that case.
+--   - Local row only when CDK misses (or Fortellis isn't configured).
+--   - Once cdk_customer_id is set on this row, the dashboard never
+--     displays the local name/email — those come from CDK exclusively.
+--
+-- The columns kept here are intentionally narrow — phone, optional name,
+-- timestamps, dealer linkage. We do not store address, vehicle data, or
+-- contact preferences here; those belong to CDK.
 
 create table if not exists public.customers (
   id                uuid         primary key default gen_random_uuid(),

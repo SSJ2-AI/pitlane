@@ -10,6 +10,7 @@ import {
 } from '@/lib/mock-customers';
 import { MOCK_CALLS } from '@/lib/mock-calls';
 import type { MockVehicle } from '@/lib/mock-vehicles';
+import { isFortellisConfigured, lookupCustomerByPhone } from '@/lib/fortellis';
 import { getSupabase, type CallSummary, type CustomerRow } from '@/lib/supabase';
 
 // GET /api/customers
@@ -196,16 +197,24 @@ async function enrichFromCalls(
 
 /**
  * Phase 8b — append rows from public.customers (Aria auto-created callers)
- * that aren't already covered by MOCK_CUSTOMERS. Keyed by phone match. These
- * rows carry the minimal CustomerListRow shape with empty vehicles + zero
- * lifetime metrics — they exist purely to show every caller PitLane has
- * interacted with, including those not yet in CDK.
+ * that aren't already covered by MOCK_CUSTOMERS. Keyed by phone match.
+ *
+ * CDK-FIRST GUARD: when Fortellis is configured, each local row is checked
+ * against CDK by phone. If CDK has the customer we DON'T surface the local
+ * row in the directory — the canonical customer should appear via the CDK
+ * read path (MOCK_CUSTOMERS today; live CDK once the customer pull lands).
+ * The local row continues to exist purely as a metadata anchor for call
+ * logs / callbacks / loaner requests keyed by phone.
+ *
+ * When Fortellis isn't configured we surface every local row — the
+ * directory is the only place to find Aria-only callers in that case.
  */
 async function appendPhoneOnlyRows(rows: CustomerListRow[], dealerId: string): Promise<void> {
     const supabase = getSupabase();
     if (!supabase) return;
 
     const knownPhones = new Set(rows.map((r) => r.phone));
+    const fortellisLive = isFortellisConfigured();
 
     try {
         const { data, error } = await supabase
@@ -223,6 +232,21 @@ async function appendPhoneOnlyRows(rows: CustomerListRow[], dealerId: string): P
         }
         for (const row of ((data ?? []) as CustomerRow[])) {
             if (knownPhones.has(row.phone)) continue;
+
+            // CDK-first: when live Fortellis has the record, suppress
+            // the local row so the dashboard doesn't show two entries
+            // (one CDK, one local) for the same person. The CDK row
+            // would normally come through MOCK_CUSTOMERS today; once a
+            // real-CDK customer pull lands it'll feed the same loop.
+            if (fortellisLive) {
+                try {
+                    const cdkHit = await lookupCustomerByPhone(row.phone);
+                    if (cdkHit) continue;
+                } catch (err) {
+                    console.error('[/api/customers] CDK probe failed (non-fatal):', err instanceof Error ? err.message : err);
+                }
+            }
+
             rows.push({
                 id: `phone:${row.phone}`,
                 name: row.name ?? row.phone,
