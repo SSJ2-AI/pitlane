@@ -2,8 +2,22 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
-import type { AppointmentRow, LoanerRequestRow, UpsellRow } from '@/lib/supabase';
+import type { AppointmentRow, CallbackRequestRow, LoanerRequestRow, UpsellRow } from '@/lib/supabase';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
+
+const CALLBACK_SENTIMENT_STYLES: Record<string, string> = {
+    positive: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200',
+    neutral: 'border-zinc-700 bg-zinc-950 text-zinc-300',
+    negative: 'border-amber-500/40 bg-amber-500/10 text-amber-200',
+    frustrated: 'border-red-500/50 bg-red-500/15 text-red-200',
+};
+
+const CALLBACK_STATUS_STYLES: Record<string, string> = {
+    pending: 'border-red-500/40 bg-red-500/10 text-red-200',
+    acknowledged: 'border-amber-500/40 bg-amber-500/10 text-amber-200',
+    completed: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200',
+    cancelled: 'border-zinc-700 bg-zinc-950 text-zinc-300',
+};
 
 interface SummaryResponse {
     persistence: 'supabase' | 'none';
@@ -47,19 +61,27 @@ const APPT_STATUS_STYLES: Record<string, string> = {
 
 export default function ServiceDeskPage() {
     const [data, setData] = useState<SummaryResponse | null>(null);
+    const [callbacks, setCallbacks] = useState<CallbackRequestRow[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [actionFor, setActionFor] = useState<string | null>(null);
 
     const load = useCallback(async () => {
         try {
-            const response = await fetch('/api/service-desk/summary', { cache: 'no-store' });
-            if (!response.ok) {
-                setError(`HTTP ${response.status}`);
+            const [summaryRes, callbackRes] = await Promise.all([
+                fetch('/api/service-desk/summary', { cache: 'no-store' }),
+                fetch('/api/callbacks?status=pending,acknowledged', { cache: 'no-store' }),
+            ]);
+            if (!summaryRes.ok) {
+                setError(`HTTP ${summaryRes.status}`);
                 return;
             }
-            const payload = (await response.json()) as SummaryResponse;
+            const payload = (await summaryRes.json()) as SummaryResponse;
             setData(payload);
+            if (callbackRes.ok) {
+                const cbPayload = (await callbackRes.json()) as { callbacks?: CallbackRequestRow[] };
+                setCallbacks(cbPayload.callbacks ?? []);
+            }
             setError(null);
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Failed to load service desk');
@@ -67,6 +89,38 @@ export default function ServiceDeskPage() {
             setLoading(false);
         }
     }, []);
+
+    async function patchCallback(id: string, status: 'acknowledged' | 'completed') {
+        setActionFor(id);
+        try {
+            const r = await fetch(`/api/callbacks/${id}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status, assigned_advisor_id: 'service_desk' }),
+            });
+            if (!r.ok) {
+                const b = await r.json().catch(() => ({}));
+                throw new Error(typeof b?.error === 'string' ? b.error : `HTTP ${r.status}`);
+            }
+            await load();
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Failed to update callback');
+        } finally {
+            setActionFor(null);
+        }
+    }
+
+    function formatElapsed(iso: string): string {
+        try {
+            const diffSecs = (Date.now() - new Date(iso).getTime()) / 1000;
+            if (diffSecs < 60) return 'just now';
+            if (diffSecs < 3600) return `${Math.floor(diffSecs / 60)}m ago`;
+            if (diffSecs < 86_400) return `${Math.floor(diffSecs / 3600)}h ago`;
+            return `${Math.floor(diffSecs / 86_400)}d ago`;
+        } catch {
+            return iso;
+        }
+    }
 
     useEffect(() => {
         void load();
@@ -161,6 +215,69 @@ export default function ServiceDeskPage() {
                     </div>
                 )}
                 {error && <div className="mb-6 rounded-2xl border border-red-500/40 bg-red-500/10 px-5 py-4 text-sm text-red-100">{error}</div>}
+
+                {callbacks.length > 0 && (
+                    <section className="mb-6 rounded-3xl border border-zinc-800 bg-zinc-900 p-5">
+                        <header className="mb-4 flex items-end justify-between">
+                            <div>
+                                <p className="text-xs font-semibold uppercase tracking-[0.28em] text-zinc-500">Callback queue</p>
+                                <h3 className="mt-2 text-xl font-black text-white">Caller asks for a human</h3>
+                                <p className="mt-1 text-xs text-zinc-500">Sorted by sentiment — frustrated first, then oldest.</p>
+                            </div>
+                            <span className="rounded-full border border-red-500/40 bg-red-600/10 px-3 py-1 text-xs font-bold uppercase tracking-[0.18em] text-red-200">
+                                {callbacks.filter((c) => c.status === 'pending').length} pending
+                            </span>
+                        </header>
+                        <ul className="grid gap-3 lg:grid-cols-2">
+                            {callbacks.map((cb) => {
+                                const sentimentCls = CALLBACK_SENTIMENT_STYLES[cb.sentiment ?? 'neutral'] ?? CALLBACK_SENTIMENT_STYLES.neutral;
+                                const statusCls = CALLBACK_STATUS_STYLES[cb.status] ?? CALLBACK_STATUS_STYLES.pending;
+                                return (
+                                    <li key={cb.id} className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                                        <div className="flex items-start justify-between gap-3">
+                                            <div className="min-w-0">
+                                                <p className="text-sm font-black text-white">{cb.customer_name ?? cb.customer_phone}</p>
+                                                <p className="text-xs text-zinc-400">{cb.customer_phone}</p>
+                                                {cb.reason && <p className="mt-2 text-xs leading-5 text-zinc-300">{cb.reason}</p>}
+                                            </div>
+                                            <div className="flex flex-col items-end gap-1">
+                                                <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] ${sentimentCls}`}>
+                                                    {cb.sentiment ?? 'neutral'}
+                                                </span>
+                                                <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] ${statusCls}`}>
+                                                    {cb.status}
+                                                </span>
+                                                <span className="text-[10px] uppercase tracking-[0.22em] text-zinc-500">{formatElapsed(cb.created_at)}</span>
+                                            </div>
+                                        </div>
+                                        <div className="mt-3 flex gap-2">
+                                            {cb.status === 'pending' && (
+                                                <button
+                                                    type="button"
+                                                    disabled={actionFor === cb.id}
+                                                    onClick={() => void patchCallback(cb.id, 'acknowledged')}
+                                                    className="flex-1 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.18em] text-amber-200 transition hover:border-amber-300 hover:bg-amber-500/20 disabled:opacity-50"
+                                                >
+                                                    Acknowledge
+                                                </button>
+                                            )}
+                                            {cb.status !== 'completed' && (
+                                                <button
+                                                    type="button"
+                                                    disabled={actionFor === cb.id}
+                                                    onClick={() => void patchCallback(cb.id, 'completed')}
+                                                    className="flex-1 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.18em] text-emerald-200 transition hover:border-emerald-400 hover:bg-emerald-500/20 disabled:opacity-50"
+                                                >
+                                                    Mark complete
+                                                </button>
+                                            )}
+                                        </div>
+                                    </li>
+                                );
+                            })}
+                        </ul>
+                    </section>
+                )}
 
                 <div className="grid gap-6 lg:grid-cols-2">
                     <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-5">

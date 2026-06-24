@@ -185,6 +185,101 @@ function heuristicSummary(transcript: TranscriptTurn[]): CallSummary {
   }
 }
 
+// ─── Phase 9a: dedicated sentiment scorer ────────────────────────────────────
+//
+// summariseTranscript() returns a 3-bucket sentiment as part of the bigger
+// JSON payload. The Phase 9a spec wants a separate, richer score:
+//
+//   { sentiment: 'positive' | 'neutral' | 'negative' | 'frustrated',
+//     score: 0.0-1.0 }
+//
+// 'frustrated' is the trigger for the service-desk callback queue to bubble
+// the call to the top of the list. The score is "how strong is the signal"
+// — useful for ordering ties and for the analytics page.
+
+export type RichSentiment = 'positive' | 'neutral' | 'negative' | 'frustrated'
+export interface SentimentScore {
+  sentiment: RichSentiment
+  score: number
+  generated_by: 'openai' | 'heuristic'
+}
+
+const SENTIMENT_PROMPT = `You are scoring the customer's emotional state in a Porsche dealership service call.
+
+Return JSON ONLY: { "sentiment": "positive" | "neutral" | "negative" | "frustrated", "score": 0.0 to 1.0 }
+
+Rules:
+- "frustrated" is reserved for callers who express anger, repeat themselves, raise their voice, or threaten to escalate. It is stronger than "negative".
+- score is your confidence in the chosen bucket (1.0 = certain, 0.5 = uncertain).
+- Do not include prose, do not include the agent's lines in your reasoning.`
+
+const RICH_SENTIMENT_VALUES: RichSentiment[] = ['positive', 'neutral', 'negative', 'frustrated']
+
+function normaliseRichSentiment(value: unknown): RichSentiment {
+  return typeof value === 'string' && (RICH_SENTIMENT_VALUES as string[]).includes(value)
+    ? (value as RichSentiment)
+    : 'neutral'
+}
+
+function clampScore(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0.5
+  if (value < 0) return 0
+  if (value > 1) return 1
+  return Math.round(value * 100) / 100
+}
+
+function heuristicSentimentScore(transcript: TranscriptTurn[]): SentimentScore {
+  const text = transcript
+    .filter((t) => (t.role ?? '').toLowerCase() === 'user')
+    .map((t) => t.message ?? '')
+    .join(' ')
+    .toLowerCase()
+  let sentiment: RichSentiment = 'neutral'
+  let score = 0.5
+  if (/\b(angry|furious|outrageous|terrible|awful|ridiculous|threaten|lawyer|escalate)\b/.test(text)) {
+    sentiment = 'frustrated'
+    score = 0.85
+  } else if (/\b(upset|disappoint|annoyed|unhappy|frustrating)\b/.test(text)) {
+    sentiment = 'negative'
+    score = 0.7
+  } else if (/\b(thank|thanks|appreciate|great|wonderful|love|excellent|perfect)\b/.test(text)) {
+    sentiment = 'positive'
+    score = 0.75
+  }
+  return { sentiment, score, generated_by: 'heuristic' }
+}
+
+export async function scoreSentiment(transcript: TranscriptTurn[]): Promise<SentimentScore> {
+  if (!Array.isArray(transcript) || transcript.length === 0) {
+    return { sentiment: 'neutral', score: 0.5, generated_by: 'heuristic' }
+  }
+  const client = getClient()
+  if (!client) return heuristicSentimentScore(transcript)
+
+  try {
+    const response = await client.chat.completions.create({
+      model: 'gpt-4o-mini',
+      temperature: 0,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: SENTIMENT_PROMPT },
+        { role: 'user', content: transcriptToText(transcript) },
+      ],
+    })
+    const content = response.choices[0]?.message?.content
+    if (!content) return heuristicSentimentScore(transcript)
+    const parsed = JSON.parse(content) as Record<string, unknown>
+    return {
+      sentiment: normaliseRichSentiment(parsed.sentiment),
+      score: clampScore(parsed.score),
+      generated_by: 'openai',
+    }
+  } catch (err) {
+    console.error('[Summarizer] sentiment scoring failed:', err instanceof Error ? err.message : err)
+    return heuristicSentimentScore(transcript)
+  }
+}
+
 export async function summariseTranscript(transcript: TranscriptTurn[]): Promise<CallSummary> {
   if (!Array.isArray(transcript) || transcript.length === 0) {
     return heuristicSummary([])

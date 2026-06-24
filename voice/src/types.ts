@@ -92,6 +92,20 @@ export type ScreenPopEvent =
       callType: OutboundCallType
       timestamp: string
     }
+  | {
+      // Phase 9a — Aria collected a callback request from the caller.
+      // Service desk surfaces it in the Callback Queue panel.
+      type: 'CALLBACK_REQUESTED'
+      callId: string | null
+      callback: {
+        id: string | null
+        phone: string
+        name: string | null
+        reason: string | null
+        sentiment: string | null
+      }
+      timestamp: string
+    }
 
 export type OutboundCallType =
   | 'appointment_reminder'

@@ -284,6 +284,84 @@ export interface CdkSyncEnqueue {
   payload: Record<string, unknown>
 }
 
+// ─── callback_requests (Phase 9a) ────────────────────────────────────────────
+
+export type CallbackSentiment = 'positive' | 'neutral' | 'negative' | 'frustrated'
+export type CallbackStatus = 'pending' | 'acknowledged' | 'completed' | 'cancelled'
+
+export interface CallbackRequestInsert {
+  dealer_id?: string | null
+  customer_phone: string
+  customer_name?: string | null
+  call_log_id?: string | null
+  reason?: string | null
+  sentiment?: CallbackSentiment | string | null
+  sentiment_score?: number | null
+}
+
+export interface CallbackRequestRow extends CallbackRequestInsert {
+  id: string
+  status: CallbackStatus
+  assigned_advisor_id: string | null
+  created_at: string
+  acknowledged_at: string | null
+  completed_at: string | null
+}
+
+export async function insertCallbackRequest(row: CallbackRequestInsert): Promise<CallbackRequestRow | null> {
+  const client = getSupabase()
+  if (!client) return null
+  try {
+    const { data, error } = await client
+      .from('callback_requests')
+      .insert(row)
+      .select('*')
+      .single()
+    if (error) {
+      const code = (error as { code?: string }).code
+      if (code === '42P01' || /relation "callback_requests" does not exist/i.test(error.message ?? '')) {
+        console.warn('[Supabase] callback_requests table missing — apply migration 0007')
+        return null
+      }
+      throw error
+    }
+    return data as CallbackRequestRow
+  } catch (err) {
+    console.error('[Supabase] insertCallbackRequest failed:', err instanceof Error ? err.message : err)
+    return null
+  }
+}
+
+/**
+ * Patch the sentiment columns on call_logs after the post-call summariser
+ * has produced a fresh score. Safe to call twice — UPDATE is idempotent.
+ */
+export async function updateCallLogSentiment(
+  callLogId: string,
+  sentiment: string,
+  sentimentScore: number | null,
+): Promise<void> {
+  const client = getSupabase()
+  if (!client) return
+  try {
+    const { error } = await client
+      .from('call_logs')
+      .update({ sentiment, sentiment_score: sentimentScore })
+      .eq('id', callLogId)
+    if (error) {
+      const code = (error as { code?: string }).code
+      // 42703 = undefined_column; migration 0007 hasn't applied yet.
+      if (code === '42703' || /column "sentiment" of relation "call_logs" does not exist/i.test(error.message ?? '')) {
+        console.warn('[Supabase] call_logs.sentiment columns missing — apply migration 0007')
+        return
+      }
+      throw error
+    }
+  } catch (err) {
+    console.error('[Supabase] updateCallLogSentiment failed:', err instanceof Error ? err.message : err)
+  }
+}
+
 // ─── customers index (Phase 8b) ───────────────────────────────────────────────
 //
 // Lightweight local index of phone numbers Aria has talked to. The columns
