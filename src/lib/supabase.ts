@@ -133,6 +133,25 @@ export interface UpsellRow {
     created_at: string;
 }
 
+/** Phase 9b — repair_order_assignments row (matches migration 0008). */
+export interface RepairOrderAssignmentRow {
+    id: string;
+    dealer_id: string | null;
+    repair_order_id: string;
+    customer_phone: string | null;
+    tech_ids: string[];
+    tech_names: string[];
+    service_status: 'pending' | 'in_progress' | 'awaiting_parts' | 'completed' | 'extended' | 'cancelled';
+    estimated_completion: string | null;
+    actual_completion: string | null;
+    extended_until: string | null;
+    extension_reason: string | null;
+    notes: string | null;
+    assigned_by: string | null;
+    created_at: string;
+    updated_at: string;
+}
+
 /** Phase 9a — callback_requests row (matches migration 0007). */
 export type CallbackStatus = 'pending' | 'acknowledged' | 'completed' | 'cancelled';
 export type RichSentiment = 'positive' | 'neutral' | 'negative' | 'frustrated';

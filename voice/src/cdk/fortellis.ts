@@ -296,6 +296,67 @@ export async function getServiceAdvisors(dealerId: string): Promise<FortellisSer
         .filter((sa): sa is FortellisServiceAdvisor => Boolean(sa))
 }
 
+// ─── 7. getEmployees (Workshop Management API — techs) ─────────────────────
+//
+// Returns the active technicians for a dealership. Used by the dashboard's
+// Phase 9b technician-assignment dropdown and (eventually) by an automatic
+// tech-matching helper that pairs the right specialty with a given service
+// code.
+//
+// Live:  GET {DEFAULT_WORKSHOP_API_URL}/employees?type=technician
+// Mock:  three plausible Porsche-shop technicians with specialties so the
+//        demo dropdown has signal.
+
+export interface FortellisEmployee {
+    employeeId: string
+    name: string
+    specialty?: string
+    source: 'fortellis' | 'mock'
+}
+
+const MOCK_TECHNICIANS: FortellisEmployee[] = [
+    { employeeId: 'tech_001', name: 'Marco Rossi', specialty: 'Engine/Transmission', source: 'mock' },
+    { employeeId: 'tech_002', name: 'Lena Park', specialty: 'Electrical/Software', source: 'mock' },
+    { employeeId: 'tech_003', name: 'Dave Chen', specialty: 'PDI/Routine Service', source: 'mock' },
+]
+
+export async function getEmployees(
+    dealerId: string,
+    opts?: { type?: 'technician' | 'advisor' | 'all' },
+): Promise<FortellisEmployee[]> {
+    if (!isFortellisLive()) {
+        return MOCK_TECHNICIANS
+    }
+
+    const dealer = await loadDealer(dealerId)
+    const baseUrl = endpoint('FORTELLIS_WORKSHOP_API_URL', DEFAULT_WORKSHOP_API_URL)
+    const type = opts?.type ?? 'technician'
+    const url = `${baseUrl}/employees?type=${encodeURIComponent(type)}`
+
+    try {
+        const payload = await fortellisFetch<{ items?: Array<Record<string, unknown>> }>(dealer, {
+            method: 'GET',
+            url,
+        })
+        const list = Array.isArray(payload.items) ? payload.items : []
+        return list
+            .map((raw): FortellisEmployee | null => {
+                const id = raw.employeeId ?? raw.id
+                if (typeof id !== 'string' || id.length === 0) return null
+                return {
+                    employeeId: id,
+                    name: typeof raw.name === 'string' ? raw.name : '',
+                    specialty: typeof raw.specialty === 'string' ? raw.specialty : undefined,
+                    source: 'fortellis',
+                }
+            })
+            .filter((emp): emp is FortellisEmployee => Boolean(emp))
+    } catch (err) {
+        console.warn('[Fortellis] getEmployees failed; falling back to mock:', err instanceof Error ? err.message : err)
+        return MOCK_TECHNICIANS
+    }
+}
+
 // ─── Customer-lookup integration with the existing Customer type ────────────
 //
 // The voice service's downstream code (pre-call webhook, customer-lookup

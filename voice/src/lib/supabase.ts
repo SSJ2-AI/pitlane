@@ -284,6 +284,139 @@ export interface CdkSyncEnqueue {
   payload: Record<string, unknown>
 }
 
+// ─── repair_order_assignments + departments (Phase 9b) ──────────────────────
+
+export interface RepairOrderAssignmentRow {
+  id: string
+  dealer_id: string | null
+  repair_order_id: string
+  customer_phone: string | null
+  tech_ids: string[]
+  tech_names: string[]
+  service_status: 'pending' | 'in_progress' | 'awaiting_parts' | 'completed' | 'extended' | 'cancelled'
+  estimated_completion: string | null
+  actual_completion: string | null
+  extended_until: string | null
+  extension_reason: string | null
+  notes: string | null
+  assigned_by: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface RepairOrderAssignmentUpsert {
+  dealer_id?: string | null
+  repair_order_id: string
+  customer_phone?: string | null
+  tech_ids?: string[]
+  tech_names?: string[]
+  service_status?: RepairOrderAssignmentRow['service_status']
+  estimated_completion?: string | null
+  actual_completion?: string | null
+  extended_until?: string | null
+  extension_reason?: string | null
+  notes?: string | null
+  assigned_by?: string | null
+}
+
+/** Insert or update the (dealer_id, repair_order_id) row. */
+export async function upsertRepairOrderAssignment(
+  row: RepairOrderAssignmentUpsert,
+): Promise<RepairOrderAssignmentRow | null> {
+  const client = getSupabase()
+  if (!client) return null
+  try {
+    const { data, error } = await client
+      .from('repair_order_assignments')
+      .upsert(
+        { ...row, updated_at: new Date().toISOString() },
+        { onConflict: 'dealer_id,repair_order_id' },
+      )
+      .select('*')
+      .single()
+    if (error) {
+      const code = (error as { code?: string }).code
+      if (code === '42P01' || /relation "repair_order_assignments" does not exist/i.test(error.message ?? '')) {
+        console.warn('[Supabase] repair_order_assignments missing — apply migration 0008')
+        return null
+      }
+      throw error
+    }
+    return data as RepairOrderAssignmentRow
+  } catch (err) {
+    console.error('[Supabase] upsertRepairOrderAssignment failed:', err instanceof Error ? err.message : err)
+    return null
+  }
+}
+
+/** Find the most recent active assignment for a given caller phone — used
+ *  by the pre-call webhook to inject ro_status etc. into dynamic_variables. */
+export async function findActiveAssignmentForPhone(
+  phone: string,
+  dealerId?: string | null,
+): Promise<RepairOrderAssignmentRow | null> {
+  const client = getSupabase()
+  if (!client || !phone) return null
+  try {
+    let query = client
+      .from('repair_order_assignments')
+      .select('*')
+      .eq('customer_phone', phone)
+      .in('service_status', ['pending', 'in_progress', 'awaiting_parts', 'extended'])
+      .order('updated_at', { ascending: false })
+      .limit(1)
+    if (dealerId) query = query.eq('dealer_id', dealerId)
+    const { data, error } = await query.maybeSingle()
+    if (error) {
+      const code = (error as { code?: string }).code
+      if (code === '42P01') return null
+      throw error
+    }
+    return (data as RepairOrderAssignmentRow | null) ?? null
+  } catch (err) {
+    console.error('[Supabase] findActiveAssignmentForPhone failed:', err instanceof Error ? err.message : err)
+    return null
+  }
+}
+
+export interface DepartmentRow {
+  id: string
+  dealer_id: string | null
+  name: string
+  twilio_number: string | null
+  display_name: string
+  is_active: boolean
+}
+
+export async function findDepartment(
+  dealerId: string,
+  name: string,
+): Promise<DepartmentRow | null> {
+  const client = getSupabase()
+  if (!client) return null
+  try {
+    const { data, error } = await client
+      .from('departments')
+      .select('*')
+      .eq('dealer_id', dealerId)
+      .eq('name', name.trim().toLowerCase())
+      .eq('is_active', true)
+      .maybeSingle()
+    if (error) {
+      const code = (error as { code?: string }).code
+      if (code === '42P01') {
+        console.warn('[Supabase] departments missing — apply migration 0008')
+        return null
+      }
+      throw error
+    }
+    return (data as DepartmentRow | null) ?? null
+  } catch (err) {
+    console.error('[Supabase] findDepartment failed:', err instanceof Error ? err.message : err)
+    return null
+  }
+}
+
 // ─── callback_requests (Phase 9a) ────────────────────────────────────────────
 
 export type CallbackSentiment = 'positive' | 'neutral' | 'negative' | 'frustrated'

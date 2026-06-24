@@ -8,6 +8,7 @@ import { randomUUID } from 'crypto'
 import { recordEvent, startInboundCall } from '../store/callStore'
 import {
   findCustomerByPhone,
+  findDepartment,
   getOrCreateCallLogIdForConversation,
   insertAppointment,
   insertCallbackRequest,
@@ -541,6 +542,115 @@ router.get('/request_callback', (req: Request, res: Response): void => {
       customer_name: (req.query.customer_name as string | undefined) ?? null,
       reason: (req.query.reason as string | undefined) ?? null,
       sentiment: (req.query.sentiment as string | undefined) ?? null,
+      dealer_id: (req.query.dealer_id as string | undefined) ?? null,
+      call_id: (req.query.call_id as string | undefined) ?? null,
+    },
+    res,
+  )
+})
+
+// ─── Phase 9b: transfer_call ────────────────────────────────────────────────
+//
+// ElevenLabs tool registration:
+//   URL:    https://pitlane-voice-production.up.railway.app/tools/transfer_call
+//   Method: GET (or POST with JSON body)
+//   Params: caller_phone (required), department (required), reason, dealer_id, call_id
+//
+// Departments are configured in the public.departments table (seeded by
+// migration 0008). For inbound Twilio calls, this tool resolves the
+// department's Twilio number and returns TwiML-style instructions that
+// the ElevenLabs agent can act on. The actual <Dial> handoff is performed
+// by Twilio on the agent's side; we just hand back the target number +
+// a display name so Aria can say "Transferring you to Parts Department".
+
+const DEPARTMENT_DISPLAY_FALLBACK: Record<string, string> = {
+  service: 'Service Advisor',
+  parts: 'Parts Department',
+  sales: 'Sales Team',
+  manager: 'Service Manager',
+  reception: 'Reception',
+}
+
+interface TransferCallInput {
+  caller_phone: string
+  department: string
+  reason?: string | null
+  dealer_id?: string | null
+  call_id?: string | null
+}
+
+async function handleTransferCall(input: TransferCallInput, res: Response): Promise<Response> {
+  const phone = (input.caller_phone ?? '').trim()
+  const department = (input.department ?? '').trim().toLowerCase()
+  const reason = input.reason?.trim() || null
+
+  console.log(
+    `[Tool] transfer_call phone=${phone || 'n/a'} department=${department || 'n/a'} ` +
+    `reason=${reason ?? 'n/a'} call=${input.call_id ?? 'n/a'}`,
+  )
+
+  if (!phone || !department) {
+    return res.status(400).json({ success: false, error: 'caller_phone and department are required' })
+  }
+
+  const dealer = await resolveDealerForCall(input.call_id ?? undefined)
+  const dealerId = input.dealer_id ?? dealer.id
+
+  // Lookup via Supabase first; fall back to a static display name when
+  // the row isn't there. The fallback is enough for Aria to acknowledge
+  // the transfer — but with no Twilio number she has to verbally hand
+  // off ('Hold while I get them on the line') rather than dial.
+  const row = await findDepartment(dealerId, department)
+  const displayName =
+    row?.display_name ?? DEPARTMENT_DISPLAY_FALLBACK[department] ?? `${department} desk`
+  const transferNumber = row?.twilio_number ?? null
+
+  if (input.call_id) {
+    recordEvent(input.call_id, 'NOTE_ADDED', {
+      source: 'aria',
+      action: 'transfer_call',
+      department,
+      reason,
+      transfer_number: transferNumber,
+      display_name: displayName,
+    })
+  }
+
+  return res.json({
+    success: true,
+    department,
+    display_name: displayName,
+    transfer_number: transferNumber,
+    message: `Transferring you now to ${displayName}. One moment please.`,
+    // TwiML instruction the ElevenLabs agent can play to Twilio. When
+    // transfer_number is null Aria should keep the customer on the
+    // line + flag the request for a human handoff via the dashboard.
+    twiml: transferNumber
+      ? `<Response><Say>Transferring you to ${escapeXml(displayName)}.</Say><Dial>${escapeXml(transferNumber)}</Dial></Response>`
+      : null,
+    persistence: row ? 'supabase' : isSupabaseConfigured() ? 'supabase_pending_migration' : 'in-memory',
+  })
+}
+
+function escapeXml(input: string): string {
+  return input
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;')
+}
+
+router.post('/transfer_call', (req: Request, res: Response): void => {
+  void handleTransferCall(req.body as TransferCallInput, res)
+})
+
+router.get('/transfer_call', (req: Request, res: Response): void => {
+  void handleTransferCall(
+    {
+      caller_phone: req.query.caller_phone as string,
+      department: req.query.department as string,
+      reason: (req.query.reason as string | undefined) ?? null,
       dealer_id: (req.query.dealer_id as string | undefined) ?? null,
       call_id: (req.query.call_id as string | undefined) ?? null,
     },
