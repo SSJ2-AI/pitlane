@@ -383,8 +383,13 @@ export interface DepartmentRow {
   id: string
   dealer_id: string | null
   name: string
-  twilio_number: string | null
+  /** E.164 destination dialed by Twilio when Aria calls transfer_call.
+   *  Renamed from the original twilio_number per the sprint-review
+   *  correction; the migration handles the rename for existing deploys. */
+  phone_number: string | null
+  extension: string | null
   display_name: string
+  display_order: number
   is_active: boolean
 }
 

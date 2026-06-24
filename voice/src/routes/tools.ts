@@ -603,7 +603,8 @@ async function handleTransferCall(input: TransferCallInput, res: Response): Prom
   const row = await findDepartment(dealerId, department)
   const displayName =
     row?.display_name ?? DEPARTMENT_DISPLAY_FALLBACK[department] ?? `${department} desk`
-  const transferNumber = row?.twilio_number ?? null
+  const transferNumber = row?.phone_number ?? null
+  const extension = row?.extension ?? null
 
   if (input.call_id) {
     recordEvent(input.call_id, 'NOTE_ADDED', {
@@ -616,18 +617,27 @@ async function handleTransferCall(input: TransferCallInput, res: Response): Prom
     })
   }
 
+  // TwiML instruction the ElevenLabs agent can play to Twilio. <Dial>
+  // takes optional <sendDigits> to dial an internal extension once the
+  // upstream PBX answers. When phone_number is null Aria should keep the
+  // customer on the line + flag the request for a human handoff via the
+  // dashboard.
+  let twiml: string | null = null
+  if (transferNumber) {
+    const dialBody = extension
+      ? `<Number sendDigits="${escapeXml('w'.repeat(2) + extension)}">${escapeXml(transferNumber)}</Number>`
+      : escapeXml(transferNumber)
+    twiml = `<Response><Say>Transferring you to ${escapeXml(displayName)}.</Say><Dial>${dialBody}</Dial></Response>`
+  }
+
   return res.json({
     success: true,
     department,
     display_name: displayName,
     transfer_number: transferNumber,
+    extension,
     message: `Transferring you now to ${displayName}. One moment please.`,
-    // TwiML instruction the ElevenLabs agent can play to Twilio. When
-    // transfer_number is null Aria should keep the customer on the
-    // line + flag the request for a human handoff via the dashboard.
-    twiml: transferNumber
-      ? `<Response><Say>Transferring you to ${escapeXml(displayName)}.</Say><Dial>${escapeXml(transferNumber)}</Dial></Response>`
-      : null,
+    twiml,
     persistence: row ? 'supabase' : isSupabaseConfigured() ? 'supabase_pending_migration' : 'in-memory',
   })
 }

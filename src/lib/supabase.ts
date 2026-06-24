@@ -133,6 +133,20 @@ export interface UpsellRow {
     created_at: string;
 }
 
+/** Phase 9b — departments row (matches migration 0008, post sprint review). */
+export interface DepartmentRow {
+    id: string;
+    dealer_id: string | null;
+    name: string;
+    phone_number: string | null;
+    extension: string | null;
+    display_name: string;
+    display_order: number;
+    is_active: boolean;
+    created_at: string;
+    updated_at: string;
+}
+
 /** Phase 9b — repair_order_assignments row (matches migration 0008). */
 export interface RepairOrderAssignmentRow {
     id: string;
