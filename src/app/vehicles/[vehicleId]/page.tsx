@@ -3,7 +3,8 @@
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
-import type { MockRecall, MockRepairOrder, MockVehicle, VehicleSource } from '@/lib/mock-vehicles';
+import type { MockRecall, MockRepairOrder, MockVehicle, VehicleSource, WarrantyInfo } from '@/lib/mock-vehicles';
+import { getVehicleWarrantyInfo } from '@/lib/mock-vehicles';
 import type { NextServicePrediction } from '@/lib/next-service';
 import { TechAssignmentPanel } from '@/components/TechAssignmentPanel';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
@@ -148,7 +149,8 @@ export default function VehicleDetailPage() {
                     <>
                         <VehicleHeaderCard data={data} />
 
-                        <div className="mt-6 grid gap-6 lg:grid-cols-2">
+                        <div className="mt-6 grid gap-6 lg:grid-cols-3">
+                            <WarrantyCard warranty={getVehicleWarrantyInfo(data.vehicle)} />
                             <NextServiceCard prediction={data.next_service} mileage={data.vehicle.mileage} />
                             <RecallsCard recalls={data.recalls} />
                         </div>
@@ -239,6 +241,60 @@ function Stat({ label, value, title }: { label: string; value: string; title?: s
 }
 
 // ─── Next service prediction card ────────────────────────────────────────────
+
+function WarrantyCard({ warranty }: { warranty: WarrantyInfo }) {
+    // Three visual states per the Phase 10 spec — > 12 months remaining
+    // (green active), 3-12 months (yellow), < 3 months or expired (red).
+    // Driven by days_remaining; unknown warranty (no in_service_date, no
+    // explicit expiry) renders as a soft neutral.
+    const days = warranty.days_remaining;
+    const days365Plus = days !== null && days > 365;
+    const days91To365 = days !== null && days > 90 && days <= 365;
+    const days1To90 = days !== null && days > 0 && days <= 90;
+    const expired = warranty.status === 'expired';
+    const unknown = warranty.status === 'unknown';
+
+    let badge: string;
+    let label: string;
+    let valueClass: string;
+    if (unknown) {
+        badge = 'border-zinc-700 bg-zinc-950 text-zinc-300';
+        label = 'Warranty status unavailable';
+        valueClass = 'text-zinc-300';
+    } else if (expired) {
+        badge = 'border-red-500/50 bg-red-500/15 text-red-200';
+        label = `WARRANTY EXPIRED ${warranty.expiry ?? ''}`.trim();
+        valueClass = 'text-red-300';
+    } else if (days1To90) {
+        badge = 'border-red-500/50 bg-red-500/15 text-red-200';
+        label = `WARRANTY EXPIRES ${warranty.expiry}`;
+        valueClass = 'text-red-300';
+    } else if (days91To365) {
+        badge = 'border-amber-500/50 bg-amber-500/15 text-amber-200';
+        label = `Expiring soon — ${Math.round((days ?? 0) / 30)} months`;
+        valueClass = 'text-amber-300';
+    } else if (days365Plus) {
+        badge = 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200';
+        label = `Active — expires ${warranty.expiry}`;
+        valueClass = 'text-emerald-300';
+    } else {
+        badge = 'border-zinc-700 bg-zinc-950 text-zinc-300';
+        label = 'Warranty status unavailable';
+        valueClass = 'text-zinc-300';
+    }
+
+    return (
+        <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-6">
+            <p className="text-sm font-semibold uppercase tracking-[0.32em] text-zinc-500">Warranty</p>
+            <p className={`mt-3 text-3xl font-black ${valueClass}`}>
+                {unknown ? '—' : days !== null && days > 0 ? `${days}d` : expired ? 'Expired' : '—'}
+            </p>
+            <span className={`mt-3 inline-block w-fit rounded-full border px-3 py-1 text-[10px] font-bold uppercase tracking-[0.18em] ${badge}`}>
+                {label}
+            </span>
+        </section>
+    );
+}
 
 function NextServiceCard({ prediction, mileage }: { prediction: NextServicePrediction | null; mileage: number }) {
     if (!prediction) return null;
