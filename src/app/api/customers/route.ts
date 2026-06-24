@@ -10,7 +10,7 @@ import {
 } from '@/lib/mock-customers';
 import { MOCK_CALLS } from '@/lib/mock-calls';
 import type { MockVehicle } from '@/lib/mock-vehicles';
-import { getSupabase, type CallSummary } from '@/lib/supabase';
+import { getSupabase, type CallSummary, type CustomerRow } from '@/lib/supabase';
 
 // GET /api/customers
 //   ?search=text   — case-insensitive name + phone + email match
@@ -47,6 +47,11 @@ export interface CustomerListRow {
     is_service_overdue: boolean;
     has_open_loaner_request: boolean;
     last_call: { date: string; outcome: CallSummary['outcome'] | null } | null;
+    /** Phase 8b — true when this row comes from public.customers (Aria
+     *  auto-created) rather than MOCK_CUSTOMERS (canonical demo roster). */
+    is_phone_only: boolean;
+    last_sentiment: string | null;
+    total_calls: number;
 }
 
 interface CustomersListResponse {
@@ -88,10 +93,14 @@ export async function GET(request: Request): Promise<NextResponse<CustomersListR
             is_service_overdue: isCustomerServiceOverdue(c.id),
             has_open_loaner_request: false,
             last_call: null,
+            is_phone_only: false,
+            last_sentiment: null,
+            total_calls: 0,
         };
     });
 
     const persistence = await enrichFromCalls(rows, dealer.id);
+    await appendPhoneOnlyRows(rows, dealer.id);
 
     const filtered = search
         ? rows.filter((r) =>
@@ -183,4 +192,61 @@ async function enrichFromCalls(
     }
 
     return useMock || !supabase ? 'mock' : 'supabase';
+}
+
+/**
+ * Phase 8b — append rows from public.customers (Aria auto-created callers)
+ * that aren't already covered by MOCK_CUSTOMERS. Keyed by phone match. These
+ * rows carry the minimal CustomerListRow shape with empty vehicles + zero
+ * lifetime metrics — they exist purely to show every caller PitLane has
+ * interacted with, including those not yet in CDK.
+ */
+async function appendPhoneOnlyRows(rows: CustomerListRow[], dealerId: string): Promise<void> {
+    const supabase = getSupabase();
+    if (!supabase) return;
+
+    const knownPhones = new Set(rows.map((r) => r.phone));
+
+    try {
+        const { data, error } = await supabase
+            .from('customers')
+            .select('*')
+            .eq('dealer_id', dealerId)
+            .order('last_call_at', { ascending: false, nullsFirst: false })
+            .limit(200);
+        if (error) {
+            const code = (error as { code?: string }).code;
+            if (code !== '42P01') {
+                console.error('[/api/customers] phone-only enrichment failed:', error.message);
+            }
+            return;
+        }
+        for (const row of ((data ?? []) as CustomerRow[])) {
+            if (knownPhones.has(row.phone)) continue;
+            rows.push({
+                id: `phone:${row.phone}`,
+                name: row.name ?? row.phone,
+                first_name: row.name?.split(' ')[0] ?? '',
+                last_name: row.name?.split(' ').slice(1).join(' ') ?? '',
+                phone: row.phone,
+                email: row.email ?? '',
+                loyalty_tier: 'Bronze',
+                preferred_language: 'en',
+                customer_since_year: row.created_at ? new Date(row.created_at).getFullYear() : new Date().getFullYear(),
+                lifetime_visits: row.total_calls,
+                lifetime_spend: 0,
+                vehicles: [],
+                open_ros_count: 0,
+                last_service_date: null,
+                is_service_overdue: false,
+                has_open_loaner_request: false,
+                last_call: row.last_call_at ? { date: row.last_call_at, outcome: null } : null,
+                is_phone_only: true,
+                last_sentiment: row.last_sentiment,
+                total_calls: row.total_calls,
+            });
+        }
+    } catch (err) {
+        console.error('[/api/customers] appendPhoneOnlyRows threw:', err instanceof Error ? err.message : err);
+    }
 }

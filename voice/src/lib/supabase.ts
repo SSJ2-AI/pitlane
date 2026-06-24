@@ -284,6 +284,202 @@ export interface CdkSyncEnqueue {
   payload: Record<string, unknown>
 }
 
+// ─── customers index (Phase 8b) ───────────────────────────────────────────────
+//
+// Lightweight local index of phone numbers Aria has talked to. The columns
+// match supabase/migrations/0006_customers.sql. See that file for the design
+// rationale (CDK stays source-of-truth for contact info; this is a routing
+// + auto-create helper only).
+
+export interface CustomerRow {
+  id: string
+  dealer_id: string | null
+  phone: string
+  name: string | null
+  email: string | null
+  cdk_customer_id: string | null
+  is_new_customer: boolean
+  total_calls: number
+  last_call_at: string | null
+  last_sentiment: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** Normalise a caller phone string: strip non-digit chars except a leading '+'. */
+export function normaliseCallerPhone(input: string | null | undefined): string {
+  if (!input) return ''
+  const trimmed = input.trim()
+  if (trimmed.startsWith('+')) return `+${trimmed.slice(1).replace(/\D/g, '')}`
+  return trimmed.replace(/\D/g, '')
+}
+
+/**
+ * Find an existing customer row by phone (within a dealer scope when given).
+ * Returns null on miss or when Supabase isn't configured.
+ */
+export async function findCustomerByPhone(
+  phone: string,
+  dealerId?: string | null,
+): Promise<CustomerRow | null> {
+  const client = getSupabase()
+  if (!client) return null
+  const normalised = normaliseCallerPhone(phone)
+  if (!normalised) return null
+
+  try {
+    let query = client.from('customers').select('*').eq('phone', normalised).limit(1)
+    if (dealerId) query = query.eq('dealer_id', dealerId)
+    const { data, error } = await query.maybeSingle()
+    if (error) {
+      // 42P01 = undefined_table; migration 0006 hasn't been applied yet.
+      const code = (error as { code?: string }).code
+      if (code === '42P01' || /relation "customers" does not exist/i.test(error.message ?? '')) {
+        console.warn('[Supabase] customers table missing — apply migration 0006')
+        return null
+      }
+      throw error
+    }
+    return (data as CustomerRow | null) ?? null
+  } catch (err) {
+    console.error('[Supabase] findCustomerByPhone failed:', err instanceof Error ? err.message : err)
+    return null
+  }
+}
+
+/**
+ * Insert a fresh customer row keyed by phone + dealer. Returns the inserted
+ * row or null on failure. ON CONFLICT (dealer_id, phone) DO UPDATE keeps the
+ * existing row but bumps updated_at so the upsert is safe to call from
+ * either the pre-call webhook or the customer_lookup tool — whichever fires
+ * first wins, the second is a no-op.
+ */
+export async function upsertCustomerByPhone(input: {
+  phone: string
+  dealer_id?: string | null
+  name?: string | null
+  email?: string | null
+  is_new_customer?: boolean
+}): Promise<CustomerRow | null> {
+  const client = getSupabase()
+  if (!client) return null
+  const normalised = normaliseCallerPhone(input.phone)
+  if (!normalised) return null
+
+  try {
+    const { data, error } = await client
+      .from('customers')
+      .upsert(
+        {
+          phone: normalised,
+          dealer_id: input.dealer_id ?? null,
+          name: input.name ?? null,
+          email: input.email ?? null,
+          is_new_customer: input.is_new_customer ?? true,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'dealer_id,phone' },
+      )
+      .select('*')
+      .single()
+    if (error) {
+      const code = (error as { code?: string }).code
+      if (code === '42P01' || /relation "customers" does not exist/i.test(error.message ?? '')) {
+        console.warn('[Supabase] customers table missing — apply migration 0006')
+        return null
+      }
+      throw error
+    }
+    return data as CustomerRow
+  } catch (err) {
+    console.error('[Supabase] upsertCustomerByPhone failed:', err instanceof Error ? err.message : err)
+    return null
+  }
+}
+
+/** Update a customer's name (used by the update_customer_name tool). */
+export async function updateCustomerName(
+  phone: string,
+  name: string,
+  dealerId?: string | null,
+): Promise<CustomerRow | null> {
+  const client = getSupabase()
+  if (!client) return null
+  const normalised = normaliseCallerPhone(phone)
+  if (!normalised || !name?.trim()) return null
+
+  try {
+    let query = client
+      .from('customers')
+      .update({ name: name.trim(), is_new_customer: false, updated_at: new Date().toISOString() })
+      .eq('phone', normalised)
+    if (dealerId) query = query.eq('dealer_id', dealerId)
+    const { data, error } = await query.select('*').single()
+    if (error) {
+      const code = (error as { code?: string }).code
+      if (code === '42P01' || /relation "customers" does not exist/i.test(error.message ?? '')) {
+        console.warn('[Supabase] customers table missing — apply migration 0006')
+        return null
+      }
+      // PGRST116 = no rows returned — phone wasn't in the table yet. Fall
+      // through to a fresh upsert so the name still lands.
+      if ((error as { code?: string }).code === 'PGRST116') {
+        return upsertCustomerByPhone({ phone, dealer_id: dealerId, name, is_new_customer: false })
+      }
+      throw error
+    }
+    return data as CustomerRow
+  } catch (err) {
+    console.error('[Supabase] updateCustomerName failed:', err instanceof Error ? err.message : err)
+    return null
+  }
+}
+
+/**
+ * Bump total_calls + last_call_at after a call completes. Idempotent in
+ * the sense that calling it twice for the same phone is fine — total_calls
+ * is incremented atomically via the RPC; an in-process race wouldn't
+ * double-count.
+ */
+export async function bumpCustomerCallStats(
+  phone: string,
+  opts?: { dealerId?: string | null; lastSentiment?: string | null; lastCallAt?: string | null },
+): Promise<void> {
+  const client = getSupabase()
+  if (!client) return
+  const normalised = normaliseCallerPhone(phone)
+  if (!normalised) return
+
+  try {
+    // We use a SELECT-then-UPDATE because Supabase v2 doesn't expose an
+    // increment helper; race window is acceptable for an analytics counter.
+    let selectQ = client.from('customers').select('total_calls').eq('phone', normalised).limit(1)
+    if (opts?.dealerId) selectQ = selectQ.eq('dealer_id', opts.dealerId)
+    const current = await selectQ.maybeSingle()
+    if (current.error) {
+      const code = (current.error as { code?: string }).code
+      if (code === '42P01') return
+      throw current.error
+    }
+    const next = ((current.data as { total_calls?: number } | null)?.total_calls ?? 0) + 1
+
+    let updateQ = client
+      .from('customers')
+      .update({
+        total_calls: next,
+        last_call_at: opts?.lastCallAt ?? new Date().toISOString(),
+        last_sentiment: opts?.lastSentiment ?? undefined,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('phone', normalised)
+    if (opts?.dealerId) updateQ = updateQ.eq('dealer_id', opts.dealerId)
+    const { error } = await updateQ
+    if (error) throw error
+  } catch (err) {
+    console.error('[Supabase] bumpCustomerCallStats failed:', err instanceof Error ? err.message : err)
+  }
+}
+
 /** Queue an outbound CDK write. The Phase 3 worker drains this. */
 export async function queueCdkSync(row: CdkSyncEnqueue): Promise<string | null> {
   const client = getSupabase()

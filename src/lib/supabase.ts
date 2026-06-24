@@ -133,6 +133,22 @@ export interface UpsellRow {
     created_at: string;
 }
 
+/** Phase 8b — local customers index row (matches migration 0006). */
+export interface CustomerRow {
+    id: string;
+    dealer_id: string | null;
+    phone: string;
+    name: string | null;
+    email: string | null;
+    cdk_customer_id: string | null;
+    is_new_customer: boolean;
+    total_calls: number;
+    last_call_at: string | null;
+    last_sentiment: string | null;
+    created_at: string;
+    updated_at: string;
+}
+
 export interface LoanerRequestRow {
     id: string;
     call_log_id: string | null;

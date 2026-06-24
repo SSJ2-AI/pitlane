@@ -7,12 +7,15 @@ import { config } from '../config'
 import { randomUUID } from 'crypto'
 import { recordEvent, startInboundCall } from '../store/callStore'
 import {
+  findCustomerByPhone,
   getOrCreateCallLogIdForConversation,
   insertAppointment,
   insertLoanerRequest,
   insertUpsell,
   isSupabaseConfigured,
   queueCdkSync,
+  updateCustomerName,
+  upsertCustomerByPhone,
 } from '../lib/supabase'
 import { dispatchSms, type SmsMessageType } from '../lib/sms'
 import { resolveDealerForCall } from '../lib/dealer'
@@ -91,10 +94,34 @@ router.post('/customer-lookup', (req: Request, res: Response): void => {
       timestamp: new Date().toISOString(),
     })
 
+    // Phase 8b auto-create: stamp the customers index for this phone so
+    // they show up on the /customers page even before they're in CDK.
+    // Also recover a previously-collected name if this is a returning
+    // unknown caller (e.g. they hung up before providing it last time).
+    let knownName: string | null = null
+    if (phone && isSupabaseConfigured()) {
+      try {
+        const dealer = await resolveDealerForCall(callId)
+        const existing = await findCustomerByPhone(phone, dealer.id)
+        knownName = existing?.name ?? null
+        if (!existing) {
+          await upsertCustomerByPhone({ phone, dealer_id: dealer.id, is_new_customer: true })
+        }
+      } catch (err) {
+        console.error('[Tool] customer_lookup auto-create failed (non-fatal):', err instanceof Error ? err.message : err)
+      }
+    }
+
     return res.json({
       found: false,
-      message: 'No customer record found for this phone number.',
-      suggestion: 'Ask the caller for their name and which vehicle they are calling about.',
+      is_new_customer: knownName === null,
+      customer_name: knownName ?? 'new customer',
+      message: knownName
+        ? `Returning caller — we know them as ${knownName} but they're not in CDK yet.`
+        : 'No customer record found for this phone number.',
+      suggestion: knownName
+        ? `Greet ${knownName} warmly. Ask how you can help today.`
+        : 'Warmly introduce yourself, ask for their name (use update_customer_name to save it), then ask how you can help.',
     })
   }
 
@@ -408,6 +435,72 @@ async function handleSendSms(input: SendSmsToolBody, res: Response): Promise<Res
     failure_reason: result.failure_reason,
   })
 }
+
+// ─── Phase 8b: update_customer_name ──────────────────────────────────────────
+//
+// ElevenLabs tool registration:
+//   URL:    https://pitlane-voice-production.up.railway.app/tools/update-customer-name
+//   Method: GET (or POST with JSON body)
+//   Params: caller_phone (required), name (required), call_id (optional)
+//
+// Aria calls this once she's collected the caller's name (typically right
+// after a is_new_customer=true conversation start). The name lands in the
+// public.customers row keyed by phone — same row the pre-call webhook
+// auto-created — so the next time this number calls, the dynamic
+// variables come back with their name.
+
+interface UpdateCustomerNameInput {
+  caller_phone: string
+  name: string
+  call_id?: string | null
+}
+
+async function handleUpdateCustomerName(
+  input: UpdateCustomerNameInput,
+  res: Response,
+): Promise<Response> {
+  const phone = (input.caller_phone ?? '').trim()
+  const name = (input.name ?? '').trim()
+
+  console.log(
+    `[Tool] update_customer_name phone=${phone || 'n/a'} name=${name || 'n/a'} call=${input.call_id ?? 'n/a'}`,
+  )
+
+  if (!phone || !name) {
+    return res.status(400).json({ updated: false, error: 'caller_phone and name are required' })
+  }
+
+  if (input.call_id) {
+    recordEvent(input.call_id, 'NOTE_ADDED', {
+      source: 'aria',
+      action: 'update_customer_name',
+      name,
+    })
+  }
+
+  const dealer = await resolveDealerForCall(input.call_id ?? undefined)
+  const row = await updateCustomerName(phone, name, dealer.id)
+  return res.json({
+    updated: Boolean(row),
+    customer_name: name,
+    persistence: row ? 'supabase' : isSupabaseConfigured() ? 'supabase_pending_migration' : 'in-memory',
+  })
+}
+
+router.post('/update-customer-name', (req: Request, res: Response): void => {
+  void handleUpdateCustomerName(req.body as UpdateCustomerNameInput, res)
+})
+
+router.get('/update-customer-name', (req: Request, res: Response): void => {
+  void handleUpdateCustomerName(
+    {
+      caller_phone: req.query.caller_phone as string,
+      name: req.query.name as string,
+      call_id: (req.query.call_id as string | undefined) ?? null,
+    },
+    res,
+  )
+})
 
 // ─── Shared appointment booking handler ───────────────────────────────────────
 
