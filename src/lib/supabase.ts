@@ -201,18 +201,23 @@ export interface CallbackRequestRow {
     completed_at: string | null;
 }
 
-/** Phase 8b — local customers index row (matches migration 0006). */
+/** Phase 8b — local customers index row.
+ *
+ *  PHASE 11 PIPEDA CORRECTION (migration 0012): name + email dropped from
+ *  the local schema. CDK is the source of truth for customer contact info.
+ *  aria_notes carries Aria's non-PII session observations only.
+ *
+ *  last_call_at was renamed to last_seen_at in 0012 — same semantic. */
 export interface CustomerRow {
     id: string;
     dealer_id: string | null;
     phone: string;
-    name: string | null;
-    email: string | null;
     cdk_customer_id: string | null;
     is_new_customer: boolean;
     total_calls: number;
-    last_call_at: string | null;
+    last_seen_at: string | null;
     last_sentiment: string | null;
+    aria_notes: string | null;
     created_at: string;
     updated_at: string;
 }

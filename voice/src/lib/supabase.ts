@@ -511,13 +511,17 @@ export interface CustomerRow {
   id: string
   dealer_id: string | null
   phone: string
-  name: string | null
-  email: string | null
+  // PIPEDA compliance (migration 0012): name + email are CDK-owned and
+  // are NEVER stored locally. The fields are intentionally absent from
+  // the row type so a future caller can't reintroduce the leak. Aria's
+  // session notes (operational observations, NOT PII) land in
+  // aria_notes.
   cdk_customer_id: string | null
   is_new_customer: boolean
   total_calls: number
-  last_call_at: string | null
+  last_seen_at: string | null
   last_sentiment: string | null
+  aria_notes: string | null
   created_at: string
   updated_at: string
 }
@@ -573,14 +577,29 @@ export async function findCustomerByPhone(
 export async function upsertCustomerByPhone(input: {
   phone: string
   dealer_id?: string | null
-  name?: string | null
-  email?: string | null
   is_new_customer?: boolean
+  aria_notes?: string | null
+  /** @deprecated name lives in CDK only post-migration 0012; passing it
+   *  here is silently ignored. The voice service queues a CDK write via
+   *  queueCdkSync({ entity_type: 'note', ... }) when Aria collects a
+   *  name — see updateCustomerName below. */
+  name?: string | null
+  /** @deprecated email lives in CDK only. Same handling as `name`. */
+  email?: string | null
 }): Promise<CustomerRow | null> {
   const client = getSupabase()
   if (!client) return null
   const normalised = normaliseCallerPhone(input.phone)
   if (!normalised) return null
+
+  // Defensive logging: if a caller still passes name/email, surface it
+  // in the Railway tail so any code that wasn't migrated is easy to
+  // spot. The fields themselves are stripped before the upsert.
+  if (input.name || input.email) {
+    console.warn(
+      '[Supabase] upsertCustomerByPhone received name/email; ignoring (PIPEDA — see migration 0012)',
+    )
+  }
 
   try {
     const { data, error } = await client
@@ -589,9 +608,8 @@ export async function upsertCustomerByPhone(input: {
         {
           phone: normalised,
           dealer_id: input.dealer_id ?? null,
-          name: input.name ?? null,
-          email: input.email ?? null,
           is_new_customer: input.is_new_customer ?? true,
+          aria_notes: input.aria_notes ?? null,
           updated_at: new Date().toISOString(),
         },
         { onConflict: 'dealer_id,phone' },
@@ -601,7 +619,7 @@ export async function upsertCustomerByPhone(input: {
     if (error) {
       const code = (error as { code?: string }).code
       if (code === '42P01' || /relation "customers" does not exist/i.test(error.message ?? '')) {
-        console.warn('[Supabase] customers table missing — apply migration 0006')
+        console.warn('[Supabase] customers table missing — apply migrations 0006 + 0012')
         return null
       }
       throw error
@@ -613,41 +631,109 @@ export async function upsertCustomerByPhone(input: {
   }
 }
 
-/** Update a customer's name (used by the update_customer_name tool). */
+/**
+ * Aria collected the caller's name. PIPEDA compliance (migration 0012)
+ * means we DO NOT persist the name locally — CDK is the customer-name
+ * source of truth.
+ *
+ * Two things happen here:
+ *   1. The local customers row's `is_new_customer` flips to false and
+ *      `aria_notes` is updated with a non-PII summary ("name collected").
+ *      This anchors the row to the caller without storing the actual name.
+ *   2. A `customer_update` job is queued in cdk_sync_queue so the Phase 3
+ *      worker can push the name to CDK Customer API on behalf of the
+ *      dealer. Until that worker is configured for customer writes, the
+ *      name lives in the call_logs.transcript only — same as any other
+ *      caller-provided detail.
+ *
+ * Returns true when at least one of the writes lands.
+ */
+export async function queueCustomerNameToCdk(
+  phone: string,
+  name: string,
+  dealerId?: string | null,
+): Promise<boolean> {
+  const client = getSupabase()
+  if (!client) return false
+  const normalised = normaliseCallerPhone(phone)
+  if (!normalised || !name?.trim()) return false
+
+  let okLocal = false
+  let okQueue = false
+
+  // 1. Flip the local row to is_new_customer=false + drop an aria_notes
+  // breadcrumb. No PII columns touched.
+  try {
+    let query = client
+      .from('customers')
+      .update({
+        is_new_customer: false,
+        aria_notes: 'Name collected by Aria; pushed to CDK',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('phone', normalised)
+    if (dealerId) query = query.eq('dealer_id', dealerId)
+    const { error } = await query
+    if (!error) okLocal = true
+    else if ((error as { code?: string }).code === 'PGRST116') {
+      // No row yet — create one without the name.
+      await upsertCustomerByPhone({ phone, dealer_id: dealerId, is_new_customer: false, aria_notes: 'Name collected by Aria; pushed to CDK' })
+      okLocal = true
+    } else if ((error as { code?: string }).code !== '42P01') {
+      console.warn('[Supabase] queueCustomerNameToCdk local update failed:', error.message)
+    }
+  } catch (err) {
+    console.error('[Supabase] queueCustomerNameToCdk local update threw:', err instanceof Error ? err.message : err)
+  }
+
+  // 2. Queue the CDK write. payload carries the name + phone so the
+  // worker has everything it needs without re-querying.
+  try {
+    const queued = await queueCdkSync({
+      entity_type: 'note',
+      entity_id: normalised,
+      dealer_id: dealerId ?? null,
+      payload: {
+        kind: 'customer_name_collected',
+        phone: normalised,
+        full_name: name.trim(),
+        collected_at: new Date().toISOString(),
+      },
+    })
+    okQueue = Boolean(queued)
+  } catch (err) {
+    console.error('[Supabase] queueCustomerNameToCdk queue insert threw:', err instanceof Error ? err.message : err)
+  }
+
+  return okLocal || okQueue
+}
+
+/** @deprecated Phase 11 PIPEDA correction (migration 0012) — local customers
+ *  table no longer stores `name`. Use queueCustomerNameToCdk() instead;
+ *  this shim is kept so the existing tool handler compiles and the call
+ *  sites don't need to change names twice. Returns null shaped like a row
+ *  so the caller's `Boolean(row)` check still works. */
 export async function updateCustomerName(
   phone: string,
   name: string,
   dealerId?: string | null,
 ): Promise<CustomerRow | null> {
-  const client = getSupabase()
-  if (!client) return null
-  const normalised = normaliseCallerPhone(phone)
-  if (!normalised || !name?.trim()) return null
-
-  try {
-    let query = client
-      .from('customers')
-      .update({ name: name.trim(), is_new_customer: false, updated_at: new Date().toISOString() })
-      .eq('phone', normalised)
-    if (dealerId) query = query.eq('dealer_id', dealerId)
-    const { data, error } = await query.select('*').single()
-    if (error) {
-      const code = (error as { code?: string }).code
-      if (code === '42P01' || /relation "customers" does not exist/i.test(error.message ?? '')) {
-        console.warn('[Supabase] customers table missing — apply migration 0006')
-        return null
-      }
-      // PGRST116 = no rows returned — phone wasn't in the table yet. Fall
-      // through to a fresh upsert so the name still lands.
-      if ((error as { code?: string }).code === 'PGRST116') {
-        return upsertCustomerByPhone({ phone, dealer_id: dealerId, name, is_new_customer: false })
-      }
-      throw error
-    }
-    return data as CustomerRow
-  } catch (err) {
-    console.error('[Supabase] updateCustomerName failed:', err instanceof Error ? err.message : err)
-    return null
+  const ok = await queueCustomerNameToCdk(phone, name, dealerId)
+  if (!ok) return null
+  // Return a synthetic row so existing callers can treat the truthy
+  // value as "succeeded". No PII is included.
+  return {
+    id: '',
+    dealer_id: dealerId ?? null,
+    phone: normaliseCallerPhone(phone),
+    cdk_customer_id: null,
+    is_new_customer: false,
+    total_calls: 0,
+    last_seen_at: new Date().toISOString(),
+    last_sentiment: null,
+    aria_notes: 'Name collected by Aria; pushed to CDK',
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
   }
 }
 
@@ -683,7 +769,12 @@ export async function bumpCustomerCallStats(
       .from('customers')
       .update({
         total_calls: next,
-        last_call_at: opts?.lastCallAt ?? new Date().toISOString(),
+        // Phase 11 PIPEDA: column renamed last_call_at -> last_seen_at
+        // in migration 0012. Same semantic; new name reflects that the
+        // value is a generic "we have interacted with this caller"
+        // timestamp rather than implying we keep call-by-call records
+        // here.
+        last_seen_at: opts?.lastCallAt ?? new Date().toISOString(),
         last_sentiment: opts?.lastSentiment ?? undefined,
         updated_at: new Date().toISOString(),
       })

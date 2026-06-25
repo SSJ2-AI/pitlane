@@ -3,6 +3,7 @@ import { NextResponse } from 'next/server';
 import { getSupabase } from '@/lib/supabase';
 import { canViewGroupConsole, readSessionFromRequest } from '@/lib/role';
 import { getVehicleWarrantyInfo, MOCK_VEHICLES } from '@/lib/mock-vehicles';
+import { recordAudit } from '@/lib/audit';
 
 // GET /api/group/summary
 //
@@ -145,6 +146,8 @@ export async function GET(request: Request) {
     if (!canViewGroupConsole(session.role)) {
         return NextResponse.json({ error: 'Forbidden — group managers only.' }, { status: 403 });
     }
+
+    void recordAudit(request, session, { action: 'view_group_summary', resourceType: 'dealers' });
 
     if (process.env.NEXT_PUBLIC_USE_MOCK_DATA === 'true') {
         return NextResponse.json(getMockSummary());

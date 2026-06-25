@@ -2,6 +2,7 @@
 import { NextResponse } from 'next/server';
 import { getSupabase } from '@/lib/supabase';
 import { canManageStaff, dealerFilter, readSessionFromRequest } from '@/lib/role';
+import { recordAudit } from '@/lib/audit';
 
 // PATCH /api/staff/:id
 //   body: { is_active?: boolean, full_name?: string }
@@ -62,5 +63,21 @@ export async function PATCH(request: Request, context: { params: { id: string } 
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
     if (!data) return NextResponse.json({ error: 'Staff row not found or not editable' }, { status: 404 });
+
+    // PIPEDA + Canadian employment law: deactivation must invalidate the
+    // existing Supabase session immediately, not at the next idle expiry.
+    // We hit auth.admin.signOut(userId) here directly so we don't depend
+    // on the revoke-session endpoint being called separately.
+    if (body.is_active === false) {
+        try {
+            await supabase.auth.admin.signOut(id);
+        } catch (err) {
+            console.warn('[/api/staff/:id] auto-revoke on deactivate failed (non-fatal):', err instanceof Error ? err.message : err);
+        }
+        void recordAudit(request, session, { action: 'deactivate_staff', resourceType: 'staff', resourceId: id });
+    } else if (body.is_active === true) {
+        void recordAudit(request, session, { action: 'activate_staff', resourceType: 'staff', resourceId: id });
+    }
+
     return NextResponse.json({ staff: data, persistence: 'supabase' });
 }

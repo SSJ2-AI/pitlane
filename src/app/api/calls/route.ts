@@ -2,6 +2,7 @@
 import { NextResponse } from 'next/server';
 import { getSupabase, type CallLogRow } from '@/lib/supabase';
 import { resolveScopeForRequest } from '@/lib/dealer';
+import { recordAudit } from '@/lib/audit';
 import { getCustomerName } from '@/lib/mock-customers';
 import { MOCK_CALLS } from '@/lib/mock-calls';
 
@@ -65,6 +66,12 @@ export async function GET(request: Request) {
 
     const { data, error, count } = await query;
     if (error) console.error('[/api/calls] query error:', error.message);
+
+    void recordAudit(request, scope.session, {
+        action: 'view_call',
+        resourceType: 'call_log',
+        resourceId: customerId ?? null,
+    });
 
     return NextResponse.json({
         calls: ((data ?? []) as CallLogRow[]).map(withCustomerName),

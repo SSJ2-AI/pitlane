@@ -2,9 +2,10 @@
 
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { FormEvent, Suspense, useState } from 'react';
+import { FormEvent, Suspense, useMemo, useState } from 'react';
 import { getSupabaseBrowserClient } from '@/lib/supabase-client';
 import { landingPathForRole, type PitLaneRole } from '@/lib/role';
+import { evaluatePasswordPolicy } from '@/lib/password-policy';
 
 // /login — email + password sign-in form. Routes to the role-appropriate
 // landing page on success. "Forgot password" triggers Supabase's reset-
@@ -43,6 +44,11 @@ function LoginInner() {
     const [info, setInfo] = useState<string | null>(null);
 
     const mockMode = process.env.NEXT_PUBLIC_USE_MOCK_DATA === 'true';
+
+    // Show the policy hint once the user types something — keeps the
+    // empty-state UI quiet for returning advisors who just want to log in.
+    const policy = useMemo(() => evaluatePasswordPolicy(password), [password]);
+    const policyHint = password.length > 0 && !policy.ok;
 
     async function handleSubmit(event: FormEvent<HTMLFormElement>) {
         event.preventDefault();
@@ -164,6 +170,23 @@ function LoginInner() {
                 >
                     Forgot password?
                 </button>
+
+                {/* PIPEDA / Law 25 password policy hint. Displayed below the
+                    sign-in form so users picking a new password (via the
+                    Supabase magic-link sign-up flow or the reset email)
+                    know the requirements ahead of time. Actual enforcement
+                    lives in the Supabase Auth project config — this is the
+                    client-visible mirror. */}
+                {policyHint && (
+                    <div className="mt-5 rounded-2xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-[11px] leading-5 text-zinc-400">
+                        <p className="font-bold uppercase tracking-[0.18em] text-zinc-500">Password requirements</p>
+                        <ul className="mt-1 space-y-0.5">
+                            <li>At least 12 characters</li>
+                            <li>At least one number</li>
+                            <li>At least one special character</li>
+                        </ul>
+                    </div>
+                )}
             </div>
         </main>
     );

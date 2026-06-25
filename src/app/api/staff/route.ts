@@ -2,6 +2,7 @@
 import { NextResponse } from 'next/server';
 import { getSupabase, type StaffRow } from '@/lib/supabase';
 import { canManageStaff, dealerFilter, readSessionFromRequest } from '@/lib/role';
+import { recordAudit } from '@/lib/audit';
 
 // /api/staff
 //
@@ -180,6 +181,12 @@ export async function POST(request: Request) {
         }
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
+
+    void recordAudit(request, session, {
+        action: 'invite_staff',
+        resourceType: 'staff',
+        resourceId: authUserId,
+    });
 
     return NextResponse.json({ staff: data, invite_sent: inviteSent, persistence: 'supabase' });
 }

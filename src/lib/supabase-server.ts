@@ -20,6 +20,22 @@ import { createServerClient, type CookieOptions } from '@supabase/ssr';
 import { cookies } from 'next/headers';
 import type { NextRequest, NextResponse } from 'next/server';
 
+// ─── PIPEDA + Quebec Law 25 cookie hardening ────────────────────────────────
+//
+// Override the cookie options Supabase sets so every Auth cookie is
+// HttpOnly + Secure + SameSite=Strict. @supabase/ssr defaults to
+// SameSite=Lax which is permissive enough for the typical web flow;
+// Phase 11's compliance review tightens it to Strict because the
+// dashboard never embeds itself in a third-party context.
+function hardenCookieOptions(options: CookieOptions): CookieOptions {
+    return {
+        ...options,
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production' || options.secure === true,
+        sameSite: 'strict',
+    };
+}
+
 function getSupabaseUrl(): string | null {
     return (process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? '').trim() || null;
 }
@@ -51,7 +67,11 @@ export function getSupabaseServerClient() {
             setAll(cookiesToSet) {
                 try {
                     for (const { name, value, options } of cookiesToSet) {
-                        cookieStore.set({ name, value, ...(options as CookieOptions) });
+                        cookieStore.set({
+                            name,
+                            value,
+                            ...hardenCookieOptions(options as CookieOptions),
+                        });
                     }
                 } catch {
                     // setAll throws when called from a server component context
@@ -81,7 +101,11 @@ export function getSupabaseMiddlewareClient(request: NextRequest, response: Next
             },
             setAll(cookiesToSet) {
                 for (const { name, value, options } of cookiesToSet) {
-                    response.cookies.set({ name, value, ...(options as CookieOptions) });
+                    response.cookies.set({
+                        name,
+                        value,
+                        ...hardenCookieOptions(options as CookieOptions),
+                    });
                 }
             },
         },

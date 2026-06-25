@@ -2,7 +2,8 @@
 import { NextResponse } from 'next/server';
 import { getSupabase, type DepartmentRow } from '@/lib/supabase';
 import { resolveDealerForRequest } from '@/lib/dealer';
-import { canEditDepartments, readRoleFromRequest } from '@/lib/role';
+import { canEditDepartments, readRoleFromRequest, readSessionFromRequest } from '@/lib/role';
+import { recordAudit } from '@/lib/audit';
 
 // /api/departments/:id — PATCH + DELETE for the service-manager UI.
 // Both gated on canEditDepartments(role); advisors get a 403. Aria is
@@ -58,6 +59,11 @@ export async function PATCH(request: Request, context: { params: { id: string } 
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
     if (!data) return NextResponse.json({ error: 'Department not found' }, { status: 404 });
+    void recordAudit(request, readSessionFromRequest(request), {
+        action: 'edit_department',
+        resourceType: 'department',
+        resourceId: id,
+    });
     return NextResponse.json({ department: data, persistence: 'supabase' });
 }
 
@@ -89,5 +95,10 @@ export async function DELETE(request: Request, context: { params: { id: string }
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
     if (!count) return NextResponse.json({ error: 'Department not found' }, { status: 404 });
+    void recordAudit(request, readSessionFromRequest(request), {
+        action: 'delete_department',
+        resourceType: 'department',
+        resourceId: id,
+    });
     return NextResponse.json({ deleted: true, id, persistence: 'supabase' });
 }

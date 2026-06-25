@@ -2,7 +2,8 @@
 import { NextResponse } from 'next/server';
 import { getSupabase, type DepartmentRow } from '@/lib/supabase';
 import { resolveDealerForRequest } from '@/lib/dealer';
-import { canEditDepartments, readRoleFromRequest } from '@/lib/role';
+import { canEditDepartments, readRoleFromRequest, readSessionFromRequest } from '@/lib/role';
+import { recordAudit } from '@/lib/audit';
 
 // /api/departments
 //
@@ -126,5 +127,11 @@ export async function POST(request: Request) {
         }
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
+    void recordAudit(request, readSessionFromRequest(request), {
+        action: 'create_department',
+        resourceType: 'department',
+        resourceId: (data as { id?: string } | null)?.id ?? null,
+    });
+
     return NextResponse.json({ department: data, persistence: 'supabase' });
 }
