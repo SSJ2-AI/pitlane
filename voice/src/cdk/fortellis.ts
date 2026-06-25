@@ -357,6 +357,163 @@ export async function getEmployees(
     }
 }
 
+// ─── 8. CDK Scheduling — getAvailableSlots + bookServiceAppointment ────────
+//
+// Phase 10. The CDK Scheduling subscription returns 403 Forbidden until
+// the dealer's DevCare ticket unlocks it (see docs/future-features.md).
+// While we wait, getAvailableSlots() returns a deterministic mock — the
+// next 3 business days, two slots each (9 AM + 2 PM), alternating
+// loanerAvailable. bookServiceAppointment() stays mock-only and just
+// echoes a generated CDK-shaped id so the rest of the booking pipeline
+// (Supabase insert, SMS dispatch) keeps flowing.
+
+export interface FortellisServiceSlot {
+    slotId: string
+    startTime: string  // ISO
+    endTime: string    // ISO
+    durationMinutes: number
+    loanerAvailable: boolean
+    serviceAdvisorId?: string
+    source: 'fortellis' | 'mock'
+}
+
+function buildMockSlots(serviceType: string, fromDate: Date): FortellisServiceSlot[] {
+    const slots: FortellisServiceSlot[] = []
+    const cursor = new Date(fromDate)
+    cursor.setHours(0, 0, 0, 0)
+    // Skip to next business day if fromDate is a weekend.
+    while (cursor.getDay() === 0 || cursor.getDay() === 6) {
+        cursor.setDate(cursor.getDate() + 1)
+    }
+    const durationMinutes = /track|brake|annual/i.test(serviceType) ? 180 : 90
+    for (let day = 0; day < 3; day++) {
+        for (const hour of [9, 14]) {
+            const start = new Date(cursor)
+            start.setHours(hour, 0, 0, 0)
+            const end = new Date(start.getTime() + durationMinutes * 60_000)
+            slots.push({
+                slotId: `mock-slot-${start.toISOString()}`,
+                startTime: start.toISOString(),
+                endTime: end.toISOString(),
+                durationMinutes,
+                loanerAvailable: (day + hour) % 2 === 0,
+                source: 'mock',
+            })
+        }
+        // Advance to next weekday.
+        do {
+            cursor.setDate(cursor.getDate() + 1)
+        } while (cursor.getDay() === 0 || cursor.getDay() === 6)
+    }
+    return slots
+}
+
+export async function getAvailableSlots(
+    dealerId: string,
+    serviceType: string,
+    fromDate: Date = new Date(),
+): Promise<FortellisServiceSlot[]> {
+    if (!isFortellisLive()) {
+        return buildMockSlots(serviceType, fromDate)
+    }
+
+    const dealer = await loadDealer(dealerId)
+    const baseUrl = endpoint('FORTELLIS_SCHEDULING_API_URL', `${DEFAULT_WORKSHOP_API_URL.replace('/workshop-management', '')}/scheduling`)
+    const url = `${baseUrl}/available-slots?serviceType=${encodeURIComponent(serviceType)}&from=${encodeURIComponent(fromDate.toISOString())}`
+
+    try {
+        const payload = await fortellisFetch<{ items?: Array<Record<string, unknown>> }>(dealer, {
+            method: 'GET',
+            url,
+        })
+        const list = Array.isArray(payload.items) ? payload.items : []
+        return list
+            .map((raw): FortellisServiceSlot | null => {
+                const slotId = raw.slotId ?? raw.id
+                const startTime = raw.startTime ?? raw.start_time
+                const endTime = raw.endTime ?? raw.end_time
+                if (typeof slotId !== 'string' || typeof startTime !== 'string' || typeof endTime !== 'string') return null
+                return {
+                    slotId,
+                    startTime,
+                    endTime,
+                    durationMinutes:
+                        typeof raw.durationMinutes === 'number'
+                            ? raw.durationMinutes
+                            : Math.max(0, Math.round((new Date(endTime).getTime() - new Date(startTime).getTime()) / 60_000)),
+                    loanerAvailable: raw.loanerAvailable === true,
+                    serviceAdvisorId: typeof raw.serviceAdvisorId === 'string' ? raw.serviceAdvisorId : undefined,
+                    source: 'fortellis',
+                }
+            })
+            .filter((s): s is FortellisServiceSlot => Boolean(s))
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        if (/403/.test(message)) {
+            console.warn('[Fortellis] CDK Scheduling not yet unlocked (403) — returning mock slots. Submit DevCare ticket to enable real availability.')
+        } else {
+            console.warn('[Fortellis] getAvailableSlots failed; falling back to mock:', message)
+        }
+        return buildMockSlots(serviceType, fromDate)
+    }
+}
+
+export interface BookSlotInput {
+    dealerId: string
+    customerId: string
+    vehicleId: string
+    slotId: string
+    serviceType: string
+    notes?: string | null
+}
+
+export interface BookSlotResult {
+    appointmentId: string
+    slotId: string
+    source: 'fortellis' | 'mock'
+}
+
+export async function bookServiceAppointment(input: BookSlotInput): Promise<BookSlotResult | null> {
+    if (!isFortellisLive()) {
+        return {
+            appointmentId: `CDK-MOCK-${Date.now().toString(36).toUpperCase()}`,
+            slotId: input.slotId,
+            source: 'mock',
+        }
+    }
+
+    const dealer = await loadDealer(input.dealerId)
+    const baseUrl = endpoint('FORTELLIS_SCHEDULING_API_URL', `${DEFAULT_WORKSHOP_API_URL.replace('/workshop-management', '')}/scheduling`)
+    const url = `${baseUrl}/appointments`
+
+    try {
+        const payload = await fortellisFetch<{ appointmentId?: string; id?: string }>(dealer, {
+            method: 'POST',
+            url,
+            body: {
+                customerId: input.customerId,
+                vehicleId: input.vehicleId,
+                slotId: input.slotId,
+                serviceType: input.serviceType,
+                notes: input.notes ?? undefined,
+            },
+        })
+        const appointmentId = payload.appointmentId ?? payload.id
+        if (!appointmentId) return null
+        return { appointmentId, slotId: input.slotId, source: 'fortellis' }
+    } catch (err) {
+        console.warn(
+            '[Fortellis] bookServiceAppointment failed; returning mock id:',
+            err instanceof Error ? err.message : err,
+        )
+        return {
+            appointmentId: `CDK-MOCK-${Date.now().toString(36).toUpperCase()}`,
+            slotId: input.slotId,
+            source: 'mock',
+        }
+    }
+}
+
 // ─── Customer-lookup integration with the existing Customer type ────────────
 //
 // The voice service's downstream code (pre-call webhook, customer-lookup

@@ -145,7 +145,33 @@ function formatOpenRecall(customer: Customer): string {
   return `${recall.component}: ${recall.remedy}`
 }
 
+// Phase 10 — derive a warranty hint from the primary vehicle. Source of
+// truth is CDK's warrantyExpiration field; until the Phase 6 CDK pull
+// lands we approximate it as in_service_date + 4 years (the standard
+// Porsche factory term). 'unknown' when the vehicle has no in-service
+// date on the mock record. Aria's system prompt uses warranty_status
+// to decide whether to proactively mention the upcoming/expired window
+// and route to request_callback.
+type WarrantyHint = { expiry: string; status: 'active' | 'expiring_soon' | 'expired' | 'unknown' }
+
+function deriveWarrantyHint(customer: Customer): WarrantyHint {
+  const vehicle = customer.vehicles[0]
+  if (!vehicle) return { expiry: '', status: 'unknown' }
+  // Vehicle.year + 4 years -> Dec 31 of that year is "close enough" without
+  // an in-service date on the type. Phase 6's CDK pull will overwrite this
+  // with the real warrantyExpiration string.
+  const expiryYear = (vehicle.year ?? 0) + 4
+  if (!expiryYear) return { expiry: '', status: 'unknown' }
+  const expiry = `${expiryYear}-12-31`
+  const today = new Date()
+  const days = Math.floor((new Date(expiry).getTime() - today.getTime()) / 86_400_000)
+  if (days < 0) return { expiry, status: 'expired' }
+  if (days <= 365) return { expiry, status: 'expiring_soon' }
+  return { expiry, status: 'active' }
+}
+
 function buildKnownCallerVariables(customer: Customer, dealer: Dealer): Record<string, string> {
+  const warranty = deriveWarrantyHint(customer)
   return {
     customer_name: `${customer.firstName} ${customer.lastName}`.trim(),
     first_name: customer.firstName,
@@ -164,6 +190,11 @@ function buildKnownCallerVariables(customer: Customer, dealer: Dealer): Record<s
     dealership_brand: dealer.brand,
     is_known_caller: 'true',
     is_new_customer: 'false',
+    /** Phase 10 — Aria reads these to know when to proactively offer a
+     *  warranty extension callback. See the system-prompt addition in
+     *  the PR body. */
+    warranty_expiry: warranty.expiry,
+    warranty_status: warranty.status,
   }
 }
 
@@ -199,6 +230,11 @@ function buildUnknownCallerVariables(
     /** Phase 8b — true when we have no prior interaction with this phone. */
     is_new_customer: knownReturning ? 'false' : 'true',
     caller_phone: phone,
+    // Unknown caller has no vehicle on file yet, so the warranty hint is
+    // unknown — Aria's prompt should not surface a warranty conversation
+    // until the caller is matched to a vehicle.
+    warranty_expiry: '',
+    warranty_status: 'unknown',
   }
 }
 

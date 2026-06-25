@@ -24,6 +24,65 @@ export interface MockVehicle {
     customer_id: string
     customer_name: string
     in_service_date: string // ISO date — used as the basis for warranty calcs
+    /** Phase 10 — explicit warranty expiry. NULL falls back to a 4-year
+     *  derivation from in_service_date (Porsche factory warranty term). */
+    warranty_expiry?: string | null
+}
+
+export type WarrantyStatus = 'active' | 'expiring_soon' | 'expired' | 'unknown'
+
+export interface WarrantyInfo {
+    expiry: string | null
+    status: WarrantyStatus
+    days_remaining: number | null
+}
+
+/**
+ * Phase 10 — compute a vehicle's warranty status. Source of truth is
+ * CDK's warrantyExpiration field; until the Phase 6 CDK pull lands we
+ * derive it from in_service_date + 4 years (Porsche factory term) when
+ * the vehicle row doesn't have an explicit expiry.
+ *
+ * Thresholds per spec:
+ *   > 365 days       -> active        (green)
+ *   91-365 days      -> active        (green)
+ *   90-1   days      -> expiring_soon (yellow)
+ *   <= 0  days       -> expired       (red)
+ *
+ * The 3-12 month yellow band in the spec collapses to "expiring soon"
+ * once it's within 90 days — the dashboard uses one yellow pill rather
+ * than two separate ones.
+ */
+export function getVehicleWarrantyInfo(
+    vehicle: MockVehicle,
+    today: Date = new Date(),
+): WarrantyInfo {
+    const expiryIso = vehicle.warranty_expiry ?? deriveDefaultWarrantyExpiry(vehicle.in_service_date)
+    if (!expiryIso) {
+        return { expiry: null, status: 'unknown', days_remaining: null }
+    }
+    const expiry = new Date(expiryIso)
+    if (Number.isNaN(expiry.getTime())) {
+        return { expiry: null, status: 'unknown', days_remaining: null }
+    }
+    const days = Math.floor((expiry.getTime() - today.getTime()) / 86_400_000)
+    let status: WarrantyStatus
+    if (days < 0) status = 'expired'
+    else if (days <= 365) {
+        // < 12 months remaining starts surfacing as "expiring soon".
+        // < 3 months (90 days) flips to red — handled by the UI styling,
+        // not by a separate status value.
+        status = 'expiring_soon'
+    } else status = 'active'
+    return { expiry: expiryIso, status, days_remaining: days }
+}
+
+function deriveDefaultWarrantyExpiry(inServiceDate: string | null | undefined): string | null {
+    if (!inServiceDate) return null
+    const d = new Date(inServiceDate)
+    if (Number.isNaN(d.getTime())) return null
+    d.setFullYear(d.getFullYear() + 4)
+    return d.toISOString().slice(0, 10)
 }
 
 export type RoStatus = 'open' | 'in_progress' | 'awaiting_parts' | 'completed'
