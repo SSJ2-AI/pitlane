@@ -8,6 +8,7 @@ import { startInboundCall } from '../store/callStore'
 import { Customer } from '../types'
 import {
   bumpCustomerCallStats,
+  findActiveAssignmentForPhone,
   findCustomerByPhone,
   isSupabaseConfigured,
   upsertCallLog,
@@ -301,11 +302,34 @@ router.post('/pre-call', async (req: RawBodyRequest, res: Response): Promise<Res
     }).catch(() => undefined)
   }
 
+  // Phase 9b — inject active RO assignment context so Aria can proactively
+  // tell the caller where their car is ("Hi James, your Cayenne is with
+  // Marco Rossi, currently in progress, expected by 4pm"). Pulled from
+  // public.repair_order_assignments by phone.
+  const dynamicVars: Record<string, string> = customer
+    ? buildKnownCallerVariables(customer, dealer)
+    : buildUnknownCallerVariables(phone, dealer, knownNameForUnknownCaller)
+
+  if (phone && isSupabaseConfigured()) {
+    try {
+      const ro = await findActiveAssignmentForPhone(phone, dealer.id)
+      if (ro) {
+        dynamicVars.ro_status = ro.service_status
+        dynamicVars.ro_techs = ro.tech_names.join(' and ')
+        dynamicVars.ro_eta = ro.extended_until ?? ro.estimated_completion ?? ''
+        dynamicVars.ro_extension_reason = ro.extension_reason ?? ''
+        dynamicVars.has_active_ro = 'true'
+      } else {
+        dynamicVars.has_active_ro = 'false'
+      }
+    } catch (err) {
+      console.error('[Webhook] RO assignment lookup failed (non-fatal):', err instanceof Error ? err.message : err)
+    }
+  }
+
   const response: ConversationInitiationResponse = {
     type: 'conversation_initiation_client_data',
-    dynamic_variables: customer
-      ? buildKnownCallerVariables(customer, dealer)
-      : buildUnknownCallerVariables(phone, dealer, knownNameForUnknownCaller),
+    dynamic_variables: dynamicVars,
   }
   return res.json(response)
 })

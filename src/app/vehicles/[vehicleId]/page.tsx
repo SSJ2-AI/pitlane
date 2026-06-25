@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import type { MockRecall, MockRepairOrder, MockVehicle, VehicleSource } from '@/lib/mock-vehicles';
 import type { NextServicePrediction } from '@/lib/next-service';
+import { TechAssignmentPanel } from '@/components/TechAssignmentPanel';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
 
 interface VehicleResponse {
@@ -151,6 +152,18 @@ export default function VehicleDetailPage() {
                             <NextServiceCard prediction={data.next_service} mileage={data.vehicle.mileage} />
                             <RecallsCard recalls={data.recalls} />
                         </div>
+
+                        {/* Phase 9b — service-floor controls for the most
+                            recent non-completed RO. When every RO on file is
+                            closed the panel doesn't render. */}
+                        {data.repair_orders.find((ro) => ro.status !== 'completed') && (
+                            <div className="mt-6">
+                                <TechAssignmentPanel
+                                    repairOrderId={data.repair_orders.find((ro) => ro.status !== 'completed')!.ro_number}
+                                    initialStatus={data.repair_orders.find((ro) => ro.status !== 'completed')!.status}
+                                />
+                            </div>
+                        )}
 
                         <div className="mt-6">
                             <ServiceHistoryTimeline orders={data.repair_orders} persistence={data.persistence} />
