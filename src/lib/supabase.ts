@@ -133,6 +133,21 @@ export interface UpsellRow {
     created_at: string;
 }
 
+/** Phase 11 — staff row (matches migration 0010). */
+export type StaffRole = 'service_advisor' | 'service_manager' | 'group_manager';
+
+export interface StaffRow {
+    id: string;
+    dealer_id: string | null;
+    role: StaffRole;
+    full_name: string;
+    email: string;
+    is_active: boolean;
+    invited_by: string | null;
+    created_at: string;
+    updated_at: string;
+}
+
 /** Phase 9b — departments row (matches migration 0008, post sprint review). */
 export interface DepartmentRow {
     id: string;
