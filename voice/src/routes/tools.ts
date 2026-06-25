@@ -10,6 +10,7 @@ import {
   findCustomerByPhone,
   getOrCreateCallLogIdForConversation,
   insertAppointment,
+  insertCallbackRequest,
   insertLoanerRequest,
   insertUpsell,
   isSupabaseConfigured,
@@ -435,6 +436,117 @@ async function handleSendSms(input: SendSmsToolBody, res: Response): Promise<Res
     failure_reason: result.failure_reason,
   })
 }
+
+// ─── Phase 9a: request_callback ──────────────────────────────────────────────
+//
+// ElevenLabs tool registration:
+//   URL:    https://pitlane-voice-production.up.railway.app/tools/request_callback
+//   Method: GET (or POST with JSON body)
+//   Params: caller_phone (required), customer_name, reason, dealer_id,
+//           sentiment (optional), call_id (optional)
+//
+// Aria calls this whenever the caller asks for a human, their service
+// advisor, or otherwise expresses frustration she can't resolve. Side
+// effects:
+//   1. INSERT into public.callback_requests (Supabase, migration 0007).
+//   2. Broadcast CALLBACK_REQUESTED over the WebSocket so the
+//      /service-desk Callback Queue panel updates immediately.
+//   3. Return to Aria the spec-mandated confirmation message.
+
+interface RequestCallbackInput {
+  caller_phone: string
+  customer_name?: string | null
+  reason?: string | null
+  sentiment?: string | null
+  dealer_id?: string | null
+  call_id?: string | null
+}
+
+const REQUEST_CALLBACK_CONFIRMATION =
+  "I've let your service advisor know you'd like a call back. They'll reach you shortly."
+
+async function handleRequestCallback(input: RequestCallbackInput, res: Response): Promise<Response> {
+  const phone = (input.caller_phone ?? '').trim()
+  const name = input.customer_name?.trim() || null
+  const reason = input.reason?.trim() || null
+  const sentiment = input.sentiment?.trim() || null
+
+  console.log(
+    `[Tool] request_callback phone=${phone || 'n/a'} name=${name ?? 'n/a'} ` +
+    `reason=${reason ?? 'n/a'} sentiment=${sentiment ?? 'n/a'} call=${input.call_id ?? 'n/a'}`,
+  )
+
+  if (!phone) {
+    return res.status(400).json({ success: false, error: 'caller_phone is required' })
+  }
+
+  const dealer = await resolveDealerForCall(input.call_id ?? undefined)
+  const dealerId = input.dealer_id ?? dealer.id
+
+  if (input.call_id) {
+    recordEvent(input.call_id, 'NOTE_ADDED', {
+      source: 'aria',
+      action: 'request_callback',
+      reason,
+      sentiment,
+    })
+  }
+
+  let callLogId: string | null = null
+  if (input.call_id && isSupabaseConfigured()) {
+    callLogId = await getOrCreateCallLogIdForConversation(input.call_id, {
+      phone,
+      dealerId,
+    })
+  }
+
+  const row = await insertCallbackRequest({
+    dealer_id: dealerId,
+    customer_phone: phone,
+    customer_name: name,
+    call_log_id: callLogId,
+    reason,
+    sentiment,
+  })
+
+  broadcastScreenPop({
+    type: 'CALLBACK_REQUESTED',
+    callId: input.call_id ?? null,
+    callback: {
+      id: row?.id ?? null,
+      phone,
+      name,
+      reason,
+      sentiment,
+    },
+    timestamp: new Date().toISOString(),
+  })
+
+  return res.json({
+    success: true,
+    callback_id: row?.id ?? null,
+    message: REQUEST_CALLBACK_CONFIRMATION,
+    persistence: row ? 'supabase' : isSupabaseConfigured() ? 'supabase_pending_migration' : 'in-memory',
+  })
+}
+
+router.post('/request_callback', (req: Request, res: Response): void => {
+  void handleRequestCallback(req.body as RequestCallbackInput, res)
+})
+
+router.get('/request_callback', (req: Request, res: Response): void => {
+  void handleRequestCallback(
+    {
+      caller_phone: req.query.caller_phone as string,
+      customer_name: (req.query.customer_name as string | undefined) ?? null,
+      reason: (req.query.reason as string | undefined) ?? null,
+      sentiment: (req.query.sentiment as string | undefined) ?? null,
+      dealer_id: (req.query.dealer_id as string | undefined) ?? null,
+      call_id: (req.query.call_id as string | undefined) ?? null,
+    },
+    res,
+  )
+})
 
 // ─── Phase 8b: update_customer_name ──────────────────────────────────────────
 //

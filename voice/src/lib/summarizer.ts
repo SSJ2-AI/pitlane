@@ -185,6 +185,70 @@ function heuristicSummary(transcript: TranscriptTurn[]): CallSummary {
   }
 }
 
+// ─── Phase 9a: rule-based sentiment scorer ───────────────────────────────────
+//
+// summariseTranscript() returns a 3-bucket sentiment as part of the bigger
+// JSON payload. The Phase 9a spec calls out a separate, richer score:
+//
+//   { sentiment: 'positive' | 'neutral' | 'negative' | 'frustrated',
+//     score: 0.0-1.0 }
+//
+// IMPORTANT — NO EXTERNAL AI CALLS HERE.
+// Per sprint-review correction: this scorer is purely rule-based keyword
+// matching, no OpenAI / GPT / third-party model calls. If a future product
+// decision lands an ML model it must come from ElevenLabs' built-in
+// post-call analysis (already paid for via the agent subscription) rather
+// than adding a new vendor to the stack. When the heuristic can't make a
+// confident call we return 'neutral' with a low score — the dashboard
+// renders that as a neutral pill and the queue sort doesn't prioritise it.
+//
+// 'frustrated' is the trigger that bubbles a callback to the top of the
+// service-desk queue. Score is the strength of the keyword signal.
+
+export type RichSentiment = 'positive' | 'neutral' | 'negative' | 'frustrated'
+export interface SentimentScore {
+  sentiment: RichSentiment
+  score: number
+  generated_by: 'heuristic'
+}
+
+const SENTIMENT_KEYWORDS = {
+  frustrated: /\b(angry|furious|outrageous|terrible|awful|ridiculous|threaten|lawyer|escalate|absolutely\s+not|fed\s+up|sick\s+of|complaint|complain)\b/,
+  negative: /\b(upset|disappoint|annoyed|unhappy|frustrating|frustrated|not\s+happy|unacceptable|poor\s+service|wait(ed|ing)\s+too\s+long)\b/,
+  positive: /\b(thank|thanks|appreciate|great|wonderful|love|excellent|perfect|amazing|fantastic|brilliant|helpful)\b/,
+} as const
+
+/**
+ * Rule-based sentiment classifier. Walks ONLY the caller's turns (role
+ * === 'user') so the agent's polite acknowledgements ("happy to help") don't
+ * flip the score positive. Returns neutral / 0.5 when no keyword fires.
+ */
+export function scoreSentimentSync(transcript: TranscriptTurn[]): SentimentScore {
+  if (!Array.isArray(transcript) || transcript.length === 0) {
+    return { sentiment: 'neutral', score: 0.5, generated_by: 'heuristic' }
+  }
+  const text = transcript
+    .filter((t) => (t.role ?? '').toLowerCase() === 'user')
+    .map((t) => t.message ?? '')
+    .join(' ')
+    .toLowerCase()
+
+  if (SENTIMENT_KEYWORDS.frustrated.test(text)) return { sentiment: 'frustrated', score: 0.85, generated_by: 'heuristic' }
+  if (SENTIMENT_KEYWORDS.negative.test(text)) return { sentiment: 'negative', score: 0.7, generated_by: 'heuristic' }
+  if (SENTIMENT_KEYWORDS.positive.test(text)) return { sentiment: 'positive', score: 0.75, generated_by: 'heuristic' }
+  return { sentiment: 'neutral', score: 0.5, generated_by: 'heuristic' }
+}
+
+/**
+ * Async-compatible wrapper kept for backwards compatibility with the
+ * post-call pipeline that previously awaited an OpenAI call here. The body
+ * is now synchronous; the Promise return shape just avoids touching every
+ * caller. No network I/O performed.
+ */
+export async function scoreSentiment(transcript: TranscriptTurn[]): Promise<SentimentScore> {
+  return scoreSentimentSync(transcript)
+}
+
 export async function summariseTranscript(transcript: TranscriptTurn[]): Promise<CallSummary> {
   if (!Array.isArray(transcript) || transcript.length === 0) {
     return heuristicSummary([])

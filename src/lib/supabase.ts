@@ -133,6 +133,26 @@ export interface UpsellRow {
     created_at: string;
 }
 
+/** Phase 9a — callback_requests row (matches migration 0007). */
+export type CallbackStatus = 'pending' | 'acknowledged' | 'completed' | 'cancelled';
+export type RichSentiment = 'positive' | 'neutral' | 'negative' | 'frustrated';
+
+export interface CallbackRequestRow {
+    id: string;
+    dealer_id: string | null;
+    customer_phone: string;
+    customer_name: string | null;
+    call_log_id: string | null;
+    reason: string | null;
+    sentiment: string | null;
+    sentiment_score: number | null;
+    status: CallbackStatus;
+    assigned_advisor_id: string | null;
+    created_at: string;
+    acknowledged_at: string | null;
+    completed_at: string | null;
+}
+
 /** Phase 8b — local customers index row (matches migration 0006). */
 export interface CustomerRow {
     id: string;

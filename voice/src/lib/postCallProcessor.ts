@@ -17,8 +17,8 @@ import { lookupByPhoneWithCDK, lookupById } from '../mock/customers'
 import { checkOverride } from '../mock/sessionOverrides'
 import { broadcastScreenPop } from '../ws/screenPop'
 import { endCall, getCall } from '../store/callStore'
-import { insertLoanerRequest, isSupabaseConfigured, upsertCallLog } from './supabase'
-import { summariseTranscript, type CallSummary, type TranscriptTurn } from './summarizer'
+import { insertLoanerRequest, isSupabaseConfigured, updateCallLogSentiment, upsertCallLog } from './supabase'
+import { scoreSentiment, summariseTranscript, type CallSummary, type SentimentScore, type TranscriptTurn } from './summarizer'
 import { DEFAULT_DEALER, type Dealer } from './dealer'
 import type { Customer } from '../types'
 
@@ -39,6 +39,8 @@ export interface ProcessPostCallInput {
 export interface ProcessPostCallResult {
   customer: Customer | null
   summary: CallSummary
+  /** Phase 9a — separate 4-bucket sentiment + 0.0-1.0 confidence score. */
+  sentiment: SentimentScore
   callLogId: string | null
   loanerRequestId: string | null
   persistence: 'supabase' | 'in-memory'
@@ -68,7 +70,12 @@ export async function processPostCall(input: ProcessPostCallInput): Promise<Proc
     }
   }
 
-  const summary = await summariseTranscript(input.transcript)
+  // Phase 9a: run the summariser + sentiment scorer in parallel. They're
+  // independent OpenAI calls; we don't want to serialise the round-trip.
+  const [summary, sentimentScore] = await Promise.all([
+    summariseTranscript(input.transcript),
+    scoreSentiment(input.transcript),
+  ])
 
   const callLogId = await upsertCallLog({
     call_sid: input.callSid ?? null,
@@ -84,6 +91,13 @@ export async function processPostCall(input: ProcessPostCallInput): Promise<Proc
     started_at: input.startedAt,
     ended_at: new Date().toISOString(),
   })
+
+  // Stamp the dedicated sentiment columns on the call_logs row when the
+  // upsert succeeded + Supabase has the columns (migration 0007). Safe
+  // no-op otherwise.
+  if (callLogId) {
+    await updateCallLogSentiment(callLogId, sentimentScore.sentiment, sentimentScore.score)
+  }
 
   let loanerRequestId: string | null = null
   if (summary.loaner_needed && customer?.id) {
@@ -125,6 +139,7 @@ export async function processPostCall(input: ProcessPostCallInput): Promise<Proc
   return {
     customer,
     summary,
+    sentiment: sentimentScore,
     callLogId,
     loanerRequestId,
     persistence: isSupabaseConfigured() ? 'supabase' : 'in-memory',
