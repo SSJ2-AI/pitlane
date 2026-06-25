@@ -1,4 +1,5 @@
 import { getSupabase } from './supabase';
+import { readSessionFromRequest, type PitLaneSession } from './role';
 
 // ─── PitLane multi-tenancy (dashboard) ───────────────────────────────────────
 //
@@ -79,6 +80,73 @@ export async function resolveDealerForRequest(request: Request): Promise<Dealer>
     }
 
     return DEFAULT_DEALER;
+}
+
+// ─── Phase 11 — session-scoped dealer resolution ───────────────────────────
+//
+// resolveScopeForRequest looks at the staff session attached by the
+// middleware (x-pitlane-role + x-pitlane-dealer headers) and returns the
+// effective scope:
+//
+//   group_manager      -> { dealerId: null, scope: 'group' }
+//                         API routes drop the WHERE dealer_id = ... clause.
+//                         A ?dealer= query param can narrow the view
+//                         (used by the group dashboard's drill-down).
+//
+//   service_manager    -> { dealerId: <staff.dealer_id>, scope: 'dealer' }
+//   service_advisor    -> { dealerId: <staff.dealer_id>, scope: 'advisor' }
+//                         API routes WHERE dealer_id = scopeDealerId.
+//
+// Falls back to resolveDealerForRequest()'s legacy behaviour when no
+// staff session is attached (mock mode, or auth not configured).
+export interface RequestScope {
+    session: PitLaneSession;
+    dealer: Dealer;
+    /** null when group_manager and no ?dealer= override — caller drops filter. */
+    dealerId: string | null;
+    scope: 'group' | 'dealer' | 'advisor';
+}
+
+export async function resolveScopeForRequest(request: Request): Promise<RequestScope> {
+    const session = readSessionFromRequest(request);
+    const url = new URL(request.url);
+    const dealerOverride = url.searchParams.get('dealer');
+
+    if (session.role === 'group_manager') {
+        // Group manager. If they passed ?dealer=, drill into that dealer
+        // read-only. Otherwise no filter.
+        const dealer = dealerOverride
+            ? (await fetchDealerById(dealerOverride)) ?? DEFAULT_DEALER
+            : DEFAULT_DEALER;
+        return {
+            session,
+            dealer,
+            dealerId: dealerOverride && dealerOverride.length > 0 ? dealerOverride : null,
+            scope: 'group',
+        };
+    }
+
+    // service_advisor / service_manager paths.
+    if (session.dealerId) {
+        const dealer = (await fetchDealerById(session.dealerId)) ?? DEFAULT_DEALER;
+        return {
+            session,
+            dealer,
+            dealerId: session.dealerId,
+            scope: session.role === 'service_manager' ? 'dealer' : 'advisor',
+        };
+    }
+
+    // No session dealer — likely unauthenticated mock-mode default. Use
+    // the legacy resolver (subdomain / query / header) so the existing
+    // behaviour keeps working when tests / dev hit the route without auth.
+    const dealer = await resolveDealerForRequest(request);
+    return {
+        session,
+        dealer,
+        dealerId: dealer.id,
+        scope: 'dealer',
+    };
 }
 
 async function fetchDealerById(id: string): Promise<Dealer | null> {

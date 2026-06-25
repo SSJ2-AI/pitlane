@@ -12,6 +12,8 @@ import { MOCK_CALLS } from '@/lib/mock-calls';
 import type { MockVehicle } from '@/lib/mock-vehicles';
 import { isFortellisConfigured, lookupCustomerByPhone } from '@/lib/fortellis';
 import { getSupabase, type CallSummary, type CustomerRow } from '@/lib/supabase';
+import { recordAudit } from '@/lib/audit';
+import { readSessionFromRequest } from '@/lib/role';
 
 // GET /api/customers
 //   ?search=text   — case-insensitive name + phone + email match
@@ -110,6 +112,12 @@ export async function GET(request: Request): Promise<NextResponse<CustomersListR
               r.email.toLowerCase().includes(search),
           )
         : rows;
+
+    void recordAudit(request, readSessionFromRequest(request), {
+        action: 'view_customer',
+        resourceType: 'customer_directory',
+        resourceId: search || null,
+    });
 
     return NextResponse.json({
         customers: filtered,
@@ -235,9 +243,7 @@ async function appendPhoneOnlyRows(rows: CustomerListRow[], dealerId: string): P
 
             // CDK-first: when live Fortellis has the record, suppress
             // the local row so the dashboard doesn't show two entries
-            // (one CDK, one local) for the same person. The CDK row
-            // would normally come through MOCK_CUSTOMERS today; once a
-            // real-CDK customer pull lands it'll feed the same loop.
+            // (one CDK, one local) for the same person.
             if (fortellisLive) {
                 try {
                     const cdkHit = await lookupCustomerByPhone(row.phone);
@@ -247,13 +253,19 @@ async function appendPhoneOnlyRows(rows: CustomerListRow[], dealerId: string): P
                 }
             }
 
+            // PIPEDA correction (migration 0012): name/email are no longer
+            // stored locally. Display the phone as the "name" placeholder
+            // and leave email empty. Once Aria pushes the name to CDK and
+            // the CDK pull surfaces it (Phase 6 follow-up), this branch
+            // never runs for that caller — they come through as a CDK
+            // record instead.
             rows.push({
                 id: `phone:${row.phone}`,
-                name: row.name ?? row.phone,
-                first_name: row.name?.split(' ')[0] ?? '',
-                last_name: row.name?.split(' ').slice(1).join(' ') ?? '',
+                name: row.phone,
+                first_name: '',
+                last_name: '',
                 phone: row.phone,
-                email: row.email ?? '',
+                email: '',
                 loyalty_tier: 'Bronze',
                 preferred_language: 'en',
                 customer_since_year: row.created_at ? new Date(row.created_at).getFullYear() : new Date().getFullYear(),
@@ -264,7 +276,7 @@ async function appendPhoneOnlyRows(rows: CustomerListRow[], dealerId: string): P
                 last_service_date: null,
                 is_service_overdue: false,
                 has_open_loaner_request: false,
-                last_call: row.last_call_at ? { date: row.last_call_at, outcome: null } : null,
+                last_call: row.last_seen_at ? { date: row.last_seen_at, outcome: null } : null,
                 is_phone_only: true,
                 last_sentiment: row.last_sentiment,
                 total_calls: row.total_calls,

@@ -105,7 +105,12 @@ router.post('/customer-lookup', (req: Request, res: Response): void => {
       try {
         const dealer = await resolveDealerForCall(callId)
         const existing = await findCustomerByPhone(phone, dealer.id)
-        knownName = existing?.name ?? null
+        // PIPEDA (migration 0012): local row carries no name; on a
+        // returning caller we still know we've seen them (is_new_customer
+        // is false on the row) but the name now lives in CDK. Aria should
+        // re-greet politely; the CDK pull will surface it next time.
+        knownName = null
+        void existing
         if (!existing) {
           await upsertCustomerByPhone({ phone, dealer_id: dealer.id, is_new_customer: true })
         }

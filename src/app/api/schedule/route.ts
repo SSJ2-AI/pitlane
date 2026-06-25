@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { NextResponse } from 'next/server';
 import { getSupabase, type AppointmentRow } from '@/lib/supabase';
-import { resolveDealerForRequest } from '@/lib/dealer';
+import { resolveScopeForRequest } from '@/lib/dealer';
 import { getCustomerName, MOCK_APPOINTMENTS } from '@/lib/mock-customers';
 import { MOCK_VEHICLES } from '@/lib/mock-vehicles';
 
@@ -80,16 +80,17 @@ export async function GET(request: Request) {
         });
     }
 
-    const dealer = await resolveDealerForRequest(request);
-    const { data, error } = await supabase
+    const scope = await resolveScopeForRequest(request);
+    let q = supabase
         .from('appointments')
         .select('*')
-        .eq('dealer_id', dealer.id)
         .gte('date', isoDate(from))
         .lte('date', isoDate(to))
         .neq('status', 'cancelled')
         .order('date', { ascending: true })
         .order('time', { ascending: true });
+    if (scope.dealerId) q = q.eq('dealer_id', scope.dealerId);
+    const { data, error } = await q;
 
     if (error) {
         console.error('[/api/schedule] query failed:', error.message);

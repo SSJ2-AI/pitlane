@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { NextResponse } from 'next/server';
 import { getSupabase, type CallbackRequestRow } from '@/lib/supabase';
-import { resolveDealerForRequest } from '@/lib/dealer';
+import { resolveScopeForRequest } from '@/lib/dealer';
 
 // GET /api/callbacks
 //   ?status=pending|acknowledged|completed (default: pending,acknowledged)
@@ -94,13 +94,14 @@ export async function GET(request: Request) {
         rows = getMockCallbacks();
         persistence = 'mock';
     } else {
-        const dealer = await resolveDealerForRequest(request);
+        const scope = await resolveScopeForRequest(request);
         let q = supabase
             .from('callback_requests')
             .select('*')
-            .eq('dealer_id', dealer.id)
             .order('created_at', { ascending: false })
             .limit(200);
+        // group_manager (scope.dealerId === null) skips the dealer filter.
+        if (scope.dealerId) q = q.eq('dealer_id', scope.dealerId);
         if (statusFilter) q = q.in('status', statusFilter.split(','));
         else q = q.in('status', ['pending', 'acknowledged']);
         const { data, error } = await q;

@@ -5,6 +5,8 @@ import { resolveDealerForRequest } from '@/lib/dealer';
 import { isFortellisConfigured, lookupCustomerByPhone } from '@/lib/fortellis';
 import { MOCK_CALLS } from '@/lib/mock-calls';
 import { findMockCustomer, getCustomerName } from '@/lib/mock-customers';
+import { recordAudit } from '@/lib/audit';
+import { readSessionFromRequest } from '@/lib/role';
 
 // GET /api/customers/by-phone/:phone
 //
@@ -150,8 +152,11 @@ export async function GET(
     if (callsRes.error) {
         console.error('[/api/customers/by-phone] call_logs select failed:', callsRes.error.message);
     }
-    const displayName =
-        cdkCustomer ? `${cdkCustomer.firstName} ${cdkCustomer.lastName}`.trim() : customerRow?.name ?? null;
+    // PIPEDA correction (migration 0012): the local customers row no
+    // longer has a `name` column. Display name comes from CDK when CDK
+    // has the record, else falls back to the mock customer lookup, else
+    // null (the page shows the phone number in that case).
+    const displayName = cdkCustomer ? `${cdkCustomer.firstName} ${cdkCustomer.lastName}`.trim() : null;
     const calls = ((callsRes.data ?? []) as CallLogRow[]).map((c) => ({
         ...c,
         customer_name: displayName ?? getCustomerName(c.customer_id),
@@ -175,13 +180,15 @@ export async function GET(
             source: 'cdk',
         };
     } else if (customerRow) {
+        // PIPEDA correction (migration 0012): no name / email on local row.
+        // The page renders the phone as the title until CDK has the record.
         customer = {
             phone: customerRow.phone,
-            name: customerRow.name,
-            email: null, // local row's email field intentionally not surfaced — CDK owns it.
+            name: null,
+            email: null,
             is_new_customer: customerRow.is_new_customer,
             total_calls: customerRow.total_calls,
-            last_call_at: customerRow.last_call_at,
+            last_call_at: customerRow.last_seen_at,
             last_sentiment: customerRow.last_sentiment,
             source: 'supabase',
         };
@@ -199,6 +206,12 @@ export async function GET(
     } else {
         customer = null;
     }
+
+    void recordAudit(request, readSessionFromRequest(request), {
+        action: 'view_customer',
+        resourceType: 'customer',
+        resourceId: phone,
+    });
 
     return NextResponse.json({ customer, calls, persistence: 'supabase' });
 }

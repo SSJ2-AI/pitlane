@@ -308,7 +308,14 @@ router.post('/pre-call', async (req: RawBodyRequest, res: Response): Promise<Res
   if (!customer && phone && isSupabaseConfigured()) {
     try {
       const existing = await findCustomerByPhone(phone, dealer.id)
-      knownNameForUnknownCaller = existing?.name ?? null
+      // PIPEDA (migration 0012): the local customers row no longer
+      // holds the caller's name. Once Aria collected it, the name was
+      // queued for a CDK customer-update; on a subsequent call the CDK
+      // lookup will surface it. Until then we treat the caller as
+      // "returning but unidentified" — is_new_customer=false but no
+      // name to greet with.
+      knownNameForUnknownCaller = null
+      void existing
       if (!existing) {
         void upsertCustomerByPhone({
           phone,
