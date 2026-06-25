@@ -231,11 +231,18 @@ export default function CustomersPage() {
                                         >
                                             <td className="px-4 py-4">
                                                 <Link
-                                                    href={`/customers/${encodeURIComponent(c.id)}`}
+                                                    href={c.is_phone_only
+                                                        ? `/customers/by-phone/${encodeURIComponent(c.phone)}`
+                                                        : `/customers/${encodeURIComponent(c.id)}`}
                                                     className="block min-w-0"
                                                 >
                                                     <div className="flex flex-wrap items-center gap-2">
                                                         <p className="truncate text-sm font-black text-white transition hover:text-red-200">{c.name}</p>
+                                                        {c.is_phone_only && (
+                                                            <span className="rounded-full border border-yellow-500/50 bg-yellow-500/15 px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.18em] text-yellow-100">
+                                                                Not yet in CDK
+                                                            </span>
+                                                        )}
                                                         {c.is_service_overdue && (
                                                             <span className="rounded-full border border-orange-500/50 bg-orange-500/15 px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.18em] text-orange-200">
                                                                 Service overdue
@@ -247,7 +254,7 @@ export default function CustomersPage() {
                                                             </span>
                                                         )}
                                                     </div>
-                                                    <p className="mt-0.5 truncate text-xs text-zinc-500">{c.email}</p>
+                                                    <p className="mt-0.5 truncate text-xs text-zinc-500">{c.email || `${c.total_calls} call${c.total_calls === 1 ? '' : 's'}`}</p>
                                                 </Link>
                                             </td>
                                             <td className="px-4 py-4 text-zinc-300">{c.phone}</td>
@@ -290,7 +297,9 @@ export default function CustomersPage() {
                                             <td className="px-4 py-4 text-right">
                                                 <div className="flex flex-wrap justify-end gap-2">
                                                     <Link
-                                                        href={`/calls?customer_id=${encodeURIComponent(c.id)}`}
+                                                        href={c.is_phone_only
+                                                            ? `/customers/by-phone/${encodeURIComponent(c.phone)}`
+                                                            : `/calls?customer_id=${encodeURIComponent(c.id)}`}
                                                         className="rounded-full border border-zinc-700 bg-zinc-950 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-300 transition hover:border-red-500 hover:text-white"
                                                     >
                                                         View calls

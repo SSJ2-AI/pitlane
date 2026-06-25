@@ -6,7 +6,13 @@ import { checkOverride } from '../mock/sessionOverrides'
 import { broadcastScreenPop } from '../ws/screenPop'
 import { startInboundCall } from '../store/callStore'
 import { Customer } from '../types'
-import { upsertCallLog, isSupabaseConfigured } from '../lib/supabase'
+import {
+  bumpCustomerCallStats,
+  findCustomerByPhone,
+  isSupabaseConfigured,
+  upsertCallLog,
+  upsertCustomerByPhone,
+} from '../lib/supabase'
 import { processPostCall, normaliseStatus } from '../lib/postCallProcessor'
 import type { TranscriptTurn } from '../lib/summarizer'
 import { getDealerByPhone, type Dealer } from '../lib/dealer'
@@ -156,14 +162,26 @@ function buildKnownCallerVariables(customer: Customer, dealer: Dealer): Record<s
     dealership_branch: dealer.location,
     dealership_brand: dealer.brand,
     is_known_caller: 'true',
+    is_new_customer: 'false',
   }
 }
 
-function buildUnknownCallerVariables(phone: string, dealer: Dealer): Record<string, string> {
+function buildUnknownCallerVariables(
+  phone: string,
+  dealer: Dealer,
+  knownName: string | null,
+): Record<string, string> {
+  // Phase 8b: when we've already collected the caller's name on a previous
+  // call (knownName), surface it so Aria can greet them by name even
+  // though they're not in CDK yet ("Hi Sarah — what can I help with?").
+  // is_new_customer is false on the second touch because we know who they
+  // are; is_known_caller stays false because we still haven't matched them
+  // to a CDK customer record.
+  const knownReturning = Boolean(knownName)
   return {
-    customer_name: 'valued customer',
-    first_name: '',
-    last_name: '',
+    customer_name: knownName ?? 'new customer',
+    first_name: knownName?.split(' ')[0] ?? '',
+    last_name: knownName?.split(' ').slice(1).join(' ') ?? '',
     vehicle: 'your vehicle',
     vehicles_summary: '',
     tier: 'Standard',
@@ -177,6 +195,8 @@ function buildUnknownCallerVariables(phone: string, dealer: Dealer): Record<stri
     dealership_branch: dealer.location,
     dealership_brand: dealer.brand,
     is_known_caller: 'false',
+    /** Phase 8b — true when we have no prior interaction with this phone. */
+    is_new_customer: knownReturning ? 'false' : 'true',
     caller_phone: phone,
   }
 }
@@ -242,6 +262,28 @@ router.post('/pre-call', async (req: RawBodyRequest, res: Response): Promise<Res
     console.error('[Webhook] screen-pop / store failed (non-fatal):', err instanceof Error ? err.message : err)
   }
 
+  // Phase 8b auto-create: when CDK lookup missed AND Supabase is configured,
+  // upsert the caller into the customers index so the call is associated
+  // with a stable customer row + we can show them on /customers. The
+  // findCustomerByPhone call also recovers a previously-collected name
+  // (returning unknown caller) which feeds back into the dynamic_variables.
+  let knownNameForUnknownCaller: string | null = null
+  if (!customer && phone && isSupabaseConfigured()) {
+    try {
+      const existing = await findCustomerByPhone(phone, dealer.id)
+      knownNameForUnknownCaller = existing?.name ?? null
+      if (!existing) {
+        void upsertCustomerByPhone({
+          phone,
+          dealer_id: dealer.id,
+          is_new_customer: true,
+        }).catch(() => undefined)
+      }
+    } catch (err) {
+      console.error('[Webhook] customers index lookup failed (non-fatal):', err instanceof Error ? err.message : err)
+    }
+  }
+
   // Persist an in_progress call_logs row when Supabase is configured. The
   // post-call webhook will upsert by call_sid to close it out later.
   // We don't block the response on this — Supabase round-trip is fired and
@@ -263,7 +305,7 @@ router.post('/pre-call', async (req: RawBodyRequest, res: Response): Promise<Res
     type: 'conversation_initiation_client_data',
     dynamic_variables: customer
       ? buildKnownCallerVariables(customer, dealer)
-      : buildUnknownCallerVariables(phone, dealer),
+      : buildUnknownCallerVariables(phone, dealer, knownNameForUnknownCaller),
   }
   return res.json(response)
 })
@@ -295,31 +337,33 @@ interface PostCallTranscriptTurn {
   timestamp?: number
 }
 
-interface PostCallRequestBody {
+/** Either-shape ElevenLabs payload. Production wraps everything under
+ *  `data`, legacy / synthetic fixtures ship the fields at the top level. */
+interface PostCallDataShape {
   conversation_id?: string
   call_id?: string
   call_sid?: string
-  /** Top-level fields some early ElevenLabs configs ship — kept as a fallback. */
   caller_phone?: string
   called_number?: string
   duration_secs?: number
   duration_seconds?: number
-  /** Production ElevenLabs post-call shape uses this field name. */
   call_duration_secs?: number
-  /**
-   * Production ElevenLabs post-call shape nests the Twilio caller + dialed
-   * numbers under metadata.phone_call. We check this path last (after the
-   * legacy top-level fields) so old test fixtures continue to work.
-   */
   metadata?: {
     phone_call?: {
-      external_number?: string  // caller
-      to_number?: string        // called number
+      external_number?: string
+      to_number?: string
+      internal_number?: string
     }
   }
   transcript?: PostCallTranscriptTurn[]
   status?: string
   summary?: string
+}
+
+interface PostCallRequestBody extends PostCallDataShape {
+  type?: string
+  event_timestamp?: number
+  data?: PostCallDataShape
 }
 
 function normaliseTranscript(input: PostCallTranscriptTurn[] | undefined): TranscriptTurn[] {
@@ -337,54 +381,78 @@ function normaliseTranscript(input: PostCallTranscriptTurn[] | undefined): Trans
 }
 
 router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Response> => {
+  // Phase 8b spec: even if the HMAC check fails we LOG it loudly and still
+  // process the payload so call data isn't silently dropped. Production
+  // deploys with a misconfigured secret were losing every call log.
   const verification = verifyElevenLabsSignature(req)
   if (!verification.ok) {
-    console.warn(`[Webhook] post-call rejected: ${verification.reason}`)
-    return res.status(401).json({ error: 'Unauthorized' })
+    console.error(`[post-call] sig fail: ${verification.reason}`)
   }
 
   const body = (req.body ?? {}) as PostCallRequestBody
-  const conversationId = body.conversation_id ?? body.call_id ?? null
-  const callSid = body.call_sid ?? null
-  // Caller phone fallback chain. Production ElevenLabs ships this in
-  // metadata.phone_call.external_number; older test fixtures used
-  // top-level caller_phone. Try both.
+
+  // ElevenLabs' production post-call webhook wraps the payload one level
+  // deep under `data`. Older configs / test fixtures send the fields at the
+  // top level. Read from `data` when present, top-level body otherwise.
+  const envelope: PostCallDataShape =
+    (body.data && typeof body.data === 'object') ? body.data : body
+
+  const conversationId =
+    envelope.conversation_id
+    ?? envelope.call_id
+    ?? body.conversation_id
+    ?? body.call_id
+    ?? null
+  const callSid = envelope.call_sid ?? body.call_sid ?? null
   const callerPhone = (
-    body.caller_phone
+    envelope.caller_phone
+    ?? envelope.metadata?.phone_call?.external_number
+    ?? body.caller_phone
     ?? body.metadata?.phone_call?.external_number
     ?? ''
   ).trim()
-  // Duration fallback chain. Production payloads use call_duration_secs;
-  // older / synthetic payloads have duration_secs or duration_seconds.
   const duration =
-    body.duration_secs
+    envelope.duration_secs
+    ?? envelope.duration_seconds
+    ?? envelope.call_duration_secs
+    ?? body.duration_secs
     ?? body.duration_seconds
     ?? body.call_duration_secs
     ?? 0
-  const status = normaliseStatus(body.status)
-  const transcript = normaliseTranscript(body.transcript)
+  const status = normaliseStatus(envelope.status ?? body.status)
+  const transcript = normaliseTranscript(envelope.transcript ?? body.transcript)
+  const calledNumber =
+    envelope.called_number
+    ?? envelope.metadata?.phone_call?.to_number
+    ?? envelope.metadata?.phone_call?.internal_number
+    ?? body.called_number
+    ?? body.metadata?.phone_call?.to_number
+    ?? null
 
-  // Dealer resolution also accepts the metadata-nested called number.
-  const dealer = await getDealerByPhone(
-    body.called_number ?? body.metadata?.phone_call?.to_number,
-  )
+  // Per Phase 8b spec — single debug log line capturing the parsed fields
+  // so a Railway tail can immediately confirm the unwrap worked.
+  console.log('[post-call] received', { caller_phone: callerPhone, duration })
+
+  const dealer = await getDealerByPhone(calledNumber)
 
   console.log(
     `[Webhook] post-call conv=${conversationId ?? 'n/a'} sid=${callSid ?? 'n/a'} ` +
     `phone=${callerPhone || 'unknown'} dealer=${dealer.name} dur=${duration}s ` +
-    `status=${status} turns=${transcript.length}`,
+    `status=${status} turns=${transcript.length} envelope=${envelope === body ? 'flat' : 'wrapped'}`,
   )
-  // DEBUG dump: keys + shape, not values, so we don't print PII or
-  // multi-KB transcripts to the log. Lets us confirm against ElevenLabs
-  // payload-format changes without spamming production logs.
-  console.debug(
-    '[Webhook] post-call body keys:',
-    Object.keys(body),
-    'metadata keys:',
-    body.metadata ? Object.keys(body.metadata) : null,
-    'phone_call keys:',
-    body.metadata?.phone_call ? Object.keys(body.metadata.phone_call) : null,
-  )
+
+  // Phase 8b auto-create: stamp / bump the customers index for this phone
+  // so brand-new callers show up on the /customers page even before they're
+  // matched to a CDK record. No-op when Supabase isn't configured.
+  if (callerPhone && isSupabaseConfigured()) {
+    void upsertCustomerByPhone({
+      phone: callerPhone,
+      dealer_id: dealer.id,
+      is_new_customer: true,
+    })
+      .then(() => bumpCustomerCallStats(callerPhone, { dealerId: dealer.id }))
+      .catch(() => undefined)
+  }
 
   const result = await processPostCall({
     callSid,
