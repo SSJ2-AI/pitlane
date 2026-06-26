@@ -26,7 +26,7 @@ export type AuditAction =
     | 'update_loaner_vehicle'
     | 'delete_loaner_vehicle'
     | 'loaner_request_created'
-    | 'update_loaner_request'
+    | 'loaner_request_updated'
     | 'edit_department'
     | 'create_department'
     | 'delete_department'

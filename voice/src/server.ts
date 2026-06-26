@@ -115,6 +115,7 @@ app.get('/health', (_req, res) => {
         '/tools/customer-lookup',
         '/tools/available-slots',
         '/tools/book-appointment',
+        '/tools/available-slots',
         '/tools/log-upsell',
         '/tools/request-loaner',
         '/tools/check-ro-status',
@@ -268,6 +269,7 @@ httpServer.listen(config.port, () => {
 ║    POST /webhook/pre-call    (ElevenLabs init)       ║
 ║    POST /tools/customer-lookup                       ║
 ║    POST /tools/book-appointment                      ║
+║    GET  /tools/available-slots                       ║
 ║    POST /tools/check-ro-status                       ║
 ║    POST /calls/outbound                              ║
 ║    POST /calls/batch                                 ║

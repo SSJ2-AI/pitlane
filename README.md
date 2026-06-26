@@ -313,6 +313,7 @@ Railway service hasn't picked up the latest main. Fix:
 | `customer_lookup` | `GET POST /tools/customer-lookup` | Legacy mid-call ID fallback; superseded by `/webhook/pre-call` for new agents. |
 | `check_available_slots` | `GET /tools/available-slots?dealer_id=&date_from=YYYY-MM-DD&days=7` | Reads `service_schedule` and `schedule_overrides`, applies appointment capacity, and returns the first 10 `{date,time,label}` options. |
 | `book_appointment` | `POST GET /tools/book-appointment` | Books an appointment, writes to `appointments`, queues a `cdk_sync_queue` row. Returns `{confirmed, confirmation_number, advisor, duration_est_hours}`. |
+| `available_slots` | `GET /tools/available-slots` | Returns the next available service slots using `service_schedule` + `schedule_overrides` capacity. |
 | `log_upsell` | `POST GET /tools/log-upsell` | Records an upsell against the customer + call, returns `{logged, upsell_id}`. |
 | `request_loaner` | `POST GET /tools/request-loaner` | Adds a pending loaner request the service desk approves, returns `{requested, status, loaner_id}`. |
 | `repair_eta` | `GET /tools/repair-eta/:ro_id` | Status + ETA for an existing repair order. Mock-derived today, Fortellis RO Async in Phase 3. |

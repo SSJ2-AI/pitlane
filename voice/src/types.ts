@@ -131,6 +131,10 @@ export interface BookAppointmentRequest extends ToolRequest {
   service_type: string
   preferred_date: string
   preferred_time?: string
+  loaner_requested?: boolean
+  needs_loaner?: boolean
+  start_date?: string
+  end_date?: string
 }
 
 export interface CheckROStatusRequest extends ToolRequest {

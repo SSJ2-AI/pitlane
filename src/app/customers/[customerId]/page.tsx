@@ -3,10 +3,8 @@
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
-import type { FormEvent } from 'react';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
 import type { CustomerDetailPayload } from '@/app/api/customers/[id]/route';
-import type { LoanerVehicleRow } from '@/lib/supabase';
 
 const TIER_STYLES: Record<string, string> = {
     Bronze: 'border-orange-500/40 bg-orange-500/10 text-orange-200',
@@ -37,6 +35,27 @@ function formatDate(iso: string | null | undefined) {
     }
 }
 
+function tomorrowIso(): string {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    return d.toISOString().slice(0, 10);
+}
+
+function addDaysIso(baseIso: string, days: number): string {
+    const d = new Date(`${baseIso}T00:00:00`);
+    d.setDate(d.getDate() + days);
+    return d.toISOString().slice(0, 10);
+}
+
+interface LoanerVehicleOption {
+    id: string;
+    make: string;
+    model: string;
+    year: number;
+    color: string | null;
+    is_available: boolean;
+}
+
 export default function CustomerDetailPage() {
     const params = useParams<{ customerId: string }>();
     const customerId = Array.isArray(params?.customerId) ? params.customerId[0] : params?.customerId ?? '';
@@ -44,8 +63,15 @@ export default function CustomerDetailPage() {
     const [data, setData] = useState<CustomerDetailPayload | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
     const [loanerOpen, setLoanerOpen] = useState(false);
-    const [toast, setToast] = useState<string | null>(null);
+    const [loanerStartDate, setLoanerStartDate] = useState(() => tomorrowIso());
+    const [loanerEndDate, setLoanerEndDate] = useState(() => addDaysIso(tomorrowIso(), 3));
+    const [loanerVehicleId, setLoanerVehicleId] = useState('');
+    const [availableLoaners, setAvailableLoaners] = useState<LoanerVehicleOption[]>([]);
+    const [assignedLoanerId, setAssignedLoanerId] = useState('');
+    const [loanerNotes, setLoanerNotes] = useState('');
+    const [loanerBusy, setLoanerBusy] = useState(false);
 
     const load = useCallback(async () => {
         if (!customerId) return;
@@ -71,8 +97,92 @@ export default function CustomerDetailPage() {
         void load();
     }, [load]);
 
+    useEffect(() => {
+        if (!data?.vehicles?.length) return;
+        setLoanerVehicleId((current) => current || data.vehicles[0].id);
+    }, [data]);
+
+    useEffect(() => {
+        if (!loanerOpen || !loanerStartDate || !loanerEndDate) return;
+        let cancelled = false;
+        async function fetchAvailable() {
+            try {
+                const response = await fetch(
+                    `/api/manager/loaners/vehicles?available_from=${encodeURIComponent(loanerStartDate)}&available_to=${encodeURIComponent(loanerEndDate)}`,
+                    { cache: 'no-store' },
+                );
+                const payload = (await response.json()) as { vehicles?: LoanerVehicleOption[]; error?: string };
+                if (!response.ok) throw new Error(payload.error ?? `HTTP ${response.status}`);
+                if (!cancelled) {
+                    setAvailableLoaners(payload.vehicles ?? []);
+                    setAssignedLoanerId('');
+                }
+            } catch (err) {
+                if (!cancelled) {
+                    setAvailableLoaners([]);
+                    setToast({
+                        type: 'error',
+                        message: err instanceof Error ? err.message : 'Could not load available loaners',
+                    });
+                }
+            }
+        }
+        void fetchAvailable();
+        return () => {
+            cancelled = true;
+        };
+    }, [loanerEndDate, loanerOpen, loanerStartDate]);
+
+    function showToast(next: { type: 'success' | 'error'; message: string }) {
+        setToast(next);
+        window.setTimeout(() => setToast(null), 2800);
+    }
+
+    async function submitLoanerRequest() {
+        if (!data) return;
+        if (!loanerVehicleId) {
+            showToast({ type: 'error', message: 'Please select a customer vehicle.' });
+            return;
+        }
+        setLoanerBusy(true);
+        try {
+            const response = await fetch('/api/loaner-requests', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    customer_id: data.customer.id,
+                    dealer_id: data.dealer.id,
+                    vehicle_id: loanerVehicleId,
+                    loaner_vehicle_id: assignedLoanerId || null,
+                    start_date: loanerStartDate,
+                    end_date: loanerEndDate,
+                    notes: loanerNotes.trim() || null,
+                }),
+            });
+            const payload = (await response.json()) as { error?: string };
+            if (!response.ok) throw new Error(payload.error ?? `HTTP ${response.status}`);
+            setLoanerOpen(false);
+            setLoanerNotes('');
+            setAssignedLoanerId('');
+            showToast({ type: 'success', message: 'Loaner request submitted — service desk will confirm' });
+        } catch (err) {
+            showToast({ type: 'error', message: err instanceof Error ? err.message : 'Failed to submit loaner request' });
+        } finally {
+            setLoanerBusy(false);
+        }
+    }
+
     return (
         <main className="min-h-screen bg-[#09090b] text-zinc-100">
+            {toast && (
+                <div className={`fixed right-4 top-4 z-50 rounded-xl border px-4 py-3 text-sm shadow-xl ${
+                    toast.type === 'success'
+                        ? 'border-emerald-500/50 bg-emerald-600/20 text-emerald-100'
+                        : 'border-red-500/50 bg-red-600/20 text-red-100'
+                }`}>
+                    {toast.message}
+                </div>
+            )}
             <header className="sticky top-0 z-20 border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur">
                 <div className="mx-auto flex max-w-7xl flex-col gap-4 px-5 py-4 sm:flex-row sm:items-center sm:justify-between lg:px-8">
                     <Link href="/dashboard" className="flex items-center gap-3">
@@ -122,37 +232,132 @@ export default function CustomerDetailPage() {
                             ← All customers
                         </Link>
 
-                        {toast && (
-                            <div className="mb-4 rounded-2xl border border-emerald-500/40 bg-emerald-500/10 px-5 py-4 text-sm text-emerald-100">
-                                {toast}
-                            </div>
-                        )}
-
-                        <CustomerHeader data={data} onRequestLoaner={() => setLoanerOpen(true)} />
+                        <CustomerHeader
+                            data={data}
+                            onRequestLoaner={() => {
+                                const start = tomorrowIso();
+                                setLoanerStartDate(start);
+                                setLoanerEndDate(addDaysIso(start, 3));
+                                setLoanerVehicleId(data.vehicles[0]?.id ?? '');
+                                setLoanerOpen(true);
+                            }}
+                        />
 
                         <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
                             <VehiclesPanel data={data} />
                             <SidebarPanel data={data} />
                         </div>
-
-                        {loanerOpen && (
-                            <LoanerRequestModal
-                                data={data}
-                                onClose={() => setLoanerOpen(false)}
-                                onSuccess={() => {
-                                    setLoanerOpen(false);
-                                    setToast('Loaner request submitted — service desk will confirm');
-                                }}
-                            />
-                        )}
                     </>
                 )}
             </section>
+
+            {loanerOpen && data && (
+                <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 px-4">
+                    <div className="w-full max-w-2xl rounded-3xl border border-zinc-800 bg-zinc-900 p-6 shadow-2xl shadow-black/50">
+                        <div className="mb-4 flex items-start justify-between gap-3">
+                            <div>
+                                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-zinc-500">Loaner request</p>
+                                <h3 className="mt-1 text-2xl font-black text-white">Request Loaner</h3>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setLoanerOpen(false)}
+                                className="rounded-full border border-zinc-700 bg-zinc-950 px-3 py-1 text-xs font-bold uppercase tracking-[0.18em] text-zinc-300 transition hover:border-red-500 hover:text-white"
+                            >
+                                Close
+                            </button>
+                        </div>
+
+                        <div className="grid gap-3 md:grid-cols-2">
+                            <label className="flex flex-col gap-1 text-xs text-zinc-500">
+                                Customer
+                                <input
+                                    value={data.customer.name}
+                                    readOnly
+                                    className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-300"
+                                />
+                            </label>
+                            <label className="flex flex-col gap-1 text-xs text-zinc-500">
+                                Vehicle
+                                <select
+                                    value={loanerVehicleId}
+                                    onChange={(e) => setLoanerVehicleId(e.target.value)}
+                                    className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white outline-none focus:border-red-500"
+                                >
+                                    {data.vehicles.map((vehicle) => (
+                                        <option key={vehicle.id} value={vehicle.id}>
+                                            {vehicle.year} {vehicle.make} {vehicle.model}
+                                        </option>
+                                    ))}
+                                </select>
+                            </label>
+                            <label className="flex flex-col gap-1 text-xs text-zinc-500">
+                                Start date
+                                <input
+                                    type="date"
+                                    value={loanerStartDate}
+                                    onChange={(e) => {
+                                        const next = e.target.value;
+                                        setLoanerStartDate(next);
+                                        if (loanerEndDate < next) setLoanerEndDate(addDaysIso(next, 3));
+                                    }}
+                                    className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white outline-none focus:border-red-500"
+                                />
+                            </label>
+                            <label className="flex flex-col gap-1 text-xs text-zinc-500">
+                                Est. return date
+                                <input
+                                    type="date"
+                                    value={loanerEndDate}
+                                    onChange={(e) => setLoanerEndDate(e.target.value)}
+                                    className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white outline-none focus:border-red-500"
+                                />
+                            </label>
+                        </div>
+
+                        <label className="mt-3 flex flex-col gap-1 text-xs text-zinc-500">
+                            Available loaner
+                            <select
+                                value={assignedLoanerId}
+                                onChange={(e) => setAssignedLoanerId(e.target.value)}
+                                className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white outline-none focus:border-red-500"
+                            >
+                                <option value="">Vehicle will be assigned by service team</option>
+                                {availableLoaners.map((vehicle) => (
+                                    <option key={vehicle.id} value={vehicle.id}>
+                                        {vehicle.year} {vehicle.make} {vehicle.model}
+                                        {vehicle.color ? ` · ${vehicle.color}` : ''}
+                                    </option>
+                                ))}
+                            </select>
+                        </label>
+
+                        <label className="mt-3 flex flex-col gap-1 text-xs text-zinc-500">
+                            Notes
+                            <textarea
+                                value={loanerNotes}
+                                onChange={(e) => setLoanerNotes(e.target.value)}
+                                rows={3}
+                                className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white outline-none focus:border-red-500"
+                            />
+                        </label>
+
+                        <button
+                            type="button"
+                            onClick={() => void submitLoanerRequest()}
+                            disabled={loanerBusy}
+                            className="mt-4 rounded-2xl bg-red-600 px-4 py-2 text-sm font-bold uppercase tracking-[0.18em] text-white transition hover:bg-red-500 disabled:opacity-60"
+                        >
+                            {loanerBusy ? 'Submitting…' : 'Submit Request'}
+                        </button>
+                    </div>
+                </div>
+            )}
         </main>
     );
 }
 
-function CustomerHeader({ data, onRequestLoaner }: { data: CustomerDetailPayload; onRequestLoaner: () => void }) {
+function CustomerHeader({ data, onRequestLoaner }: { data: CustomerDetailPayload; onRequestLoaner?: () => void }) {
     const c = data.customer;
     return (
         <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-6 shadow-xl shadow-black/25">
@@ -191,9 +396,6 @@ function CustomerHeader({ data, onRequestLoaner }: { data: CustomerDetailPayload
                 >
                     View full call history →
                 </Link>
-                <span className="rounded-full border border-zinc-700 bg-zinc-950 px-3 py-2 text-[10px] font-bold uppercase tracking-[0.22em] text-zinc-400">
-                    {data.recent_calls.length} call{data.recent_calls.length === 1 ? '' : 's'} from {data.persistence === 'supabase' ? 'Supabase' : 'mock'}
-                </span>
                 <button
                     type="button"
                     onClick={onRequestLoaner}
@@ -201,160 +403,11 @@ function CustomerHeader({ data, onRequestLoaner }: { data: CustomerDetailPayload
                 >
                     Request Loaner
                 </button>
+                <span className="rounded-full border border-zinc-700 bg-zinc-950 px-3 py-2 text-[10px] font-bold uppercase tracking-[0.22em] text-zinc-400">
+                    {data.recent_calls.length} call{data.recent_calls.length === 1 ? '' : 's'} from {data.persistence === 'supabase' ? 'Supabase' : 'mock'}
+                </span>
             </div>
         </section>
-    );
-}
-
-function addDaysIso(iso: string, days: number): string {
-    const d = new Date(`${iso}T00:00:00`);
-    d.setDate(d.getDate() + days);
-    return d.toISOString().slice(0, 10);
-}
-
-function defaultStartDate(): string {
-    const d = new Date();
-    d.setDate(d.getDate() + 1);
-    return d.toISOString().slice(0, 10);
-}
-
-function LoanerRequestModal({
-    data,
-    onClose,
-    onSuccess,
-}: {
-    data: CustomerDetailPayload;
-    onClose: () => void;
-    onSuccess: () => void;
-}) {
-    const initialStart = defaultStartDate();
-    const [vehicleId, setVehicleId] = useState(data.vehicles[0]?.id ?? '');
-    const [startDate, setStartDate] = useState(initialStart);
-    const [endDate, setEndDate] = useState(addDaysIso(initialStart, 3));
-    const [loaners, setLoaners] = useState<LoanerVehicleRow[]>([]);
-    const [loanerVehicleId, setLoanerVehicleId] = useState('');
-    const [notes, setNotes] = useState('');
-    const [loadingLoaners, setLoadingLoaners] = useState(false);
-    const [submitting, setSubmitting] = useState(false);
-    const [error, setError] = useState<string | null>(null);
-
-    useEffect(() => {
-        let cancelled = false;
-        async function loadAvailableLoaners() {
-            setLoadingLoaners(true);
-            setError(null);
-            try {
-                const params = new URLSearchParams({ available_from: startDate, available_to: endDate });
-                const r = await fetch(`/api/manager/loaners/vehicles?${params.toString()}`, { cache: 'no-store' });
-                const body = (await r.json()) as { vehicles?: LoanerVehicleRow[]; error?: string };
-                if (!r.ok) throw new Error(body.error ?? `HTTP ${r.status}`);
-                if (!cancelled) {
-                    const rows = body.vehicles ?? [];
-                    setLoaners(rows);
-                    setLoanerVehicleId((current) => (rows.some((row) => row.id === current) ? current : rows[0]?.id ?? ''));
-                }
-            } catch (err) {
-                if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load available loaners');
-            } finally {
-                if (!cancelled) setLoadingLoaners(false);
-            }
-        }
-        void loadAvailableLoaners();
-        return () => {
-            cancelled = true;
-        };
-    }, [endDate, startDate]);
-
-    async function submit(event: FormEvent<HTMLFormElement>) {
-        event.preventDefault();
-        setSubmitting(true);
-        setError(null);
-        try {
-            const r = await fetch('/api/loaner-requests', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    customer_id: data.customer.id,
-                    dealer_id: data.dealer.id,
-                    vehicle_id: vehicleId || null,
-                    loaner_vehicle_id: loanerVehicleId || null,
-                    start_date: startDate,
-                    end_date: endDate,
-                    notes,
-                }),
-            });
-            const body = (await r.json()) as { error?: string };
-            if (!r.ok) throw new Error(body.error ?? `HTTP ${r.status}`);
-            onSuccess();
-        } catch (err) {
-            setError(err instanceof Error ? err.message : 'Failed to submit loaner request');
-        } finally {
-            setSubmitting(false);
-        }
-    }
-
-    return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6">
-            <form onSubmit={submit} className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-3xl border border-zinc-800 bg-zinc-950 p-6 shadow-2xl shadow-black">
-                <div className="flex items-start justify-between gap-4">
-                    <div>
-                        <p className="text-xs font-bold uppercase tracking-[0.24em] text-red-400">Loaner request</p>
-                        <h3 className="mt-2 text-2xl font-black text-white">Request loaner vehicle</h3>
-                    </div>
-                    <button type="button" onClick={onClose} className="rounded-full border border-zinc-700 px-3 py-1 text-sm text-zinc-300 hover:border-red-500 hover:text-white">Close</button>
-                </div>
-
-                {error && <div className="mt-4 rounded-2xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-100">{error}</div>}
-
-                <div className="mt-5 grid gap-4 sm:grid-cols-2">
-                    <label className="block text-xs font-bold uppercase tracking-[0.2em] text-zinc-500">
-                        Customer
-                        <input readOnly value={data.customer.name} className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm normal-case tracking-normal text-zinc-300" />
-                    </label>
-                    <label className="block text-xs font-bold uppercase tracking-[0.2em] text-zinc-500">
-                        Customer vehicle
-                        <select value={vehicleId} onChange={(e) => setVehicleId(e.target.value)} className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm normal-case tracking-normal text-white outline-none focus:border-red-500">
-                            {data.vehicles.map((vehicle) => (
-                                <option key={vehicle.id} value={vehicle.id}>
-                                    {vehicle.year} {vehicle.make} {vehicle.model}
-                                </option>
-                            ))}
-                            {data.vehicles.length === 0 && <option value="">No vehicle selected</option>}
-                        </select>
-                    </label>
-                    <label className="block text-xs font-bold uppercase tracking-[0.2em] text-zinc-500">
-                        Start date
-                        <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm normal-case tracking-normal text-white outline-none focus:border-red-500" />
-                    </label>
-                    <label className="block text-xs font-bold uppercase tracking-[0.2em] text-zinc-500">
-                        Est. return date
-                        <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm normal-case tracking-normal text-white outline-none focus:border-red-500" />
-                    </label>
-                    <label className="block text-xs font-bold uppercase tracking-[0.2em] text-zinc-500 sm:col-span-2">
-                        Available loaner
-                        <select value={loanerVehicleId} onChange={(e) => setLoanerVehicleId(e.target.value)} disabled={loadingLoaners || loaners.length === 0} className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm normal-case tracking-normal text-white outline-none focus:border-red-500 disabled:text-zinc-500">
-                            {loaners.length === 0 ? (
-                                <option value="">Vehicle will be assigned by service team</option>
-                            ) : (
-                                loaners.map((loaner) => (
-                                    <option key={loaner.id} value={loaner.id}>
-                                        {loaner.year} {loaner.make} {loaner.model} {loaner.color ? `- ${loaner.color}` : ''}
-                                    </option>
-                                ))
-                            )}
-                        </select>
-                    </label>
-                    <label className="block text-xs font-bold uppercase tracking-[0.2em] text-zinc-500 sm:col-span-2">
-                        Notes
-                        <textarea value={notes} onChange={(e) => setNotes(e.target.value)} className="mt-2 min-h-28 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm normal-case tracking-normal text-white outline-none focus:border-red-500" />
-                    </label>
-                </div>
-
-                <button type="submit" disabled={submitting} className="mt-5 rounded-2xl border border-red-500/40 bg-red-600/15 px-5 py-3 text-sm font-black uppercase tracking-[0.22em] text-red-100 transition hover:border-red-400 hover:bg-red-600/25 disabled:opacity-50">
-                    Submit Request
-                </button>
-            </form>
-        </div>
     );
 }
 

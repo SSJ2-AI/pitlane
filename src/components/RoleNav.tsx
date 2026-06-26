@@ -27,6 +27,7 @@ const ALL_LINKS: Array<{
     { href: '/analytics', label: 'Analytics', minRole: 'service_manager' },
     { href: '/manager/calendar', label: 'Calendar', rolesOnly: ['service_manager'] },
     { href: '/manager/departments', label: 'Departments', rolesOnly: ['service_manager'] },
+    { href: '/manager/calendar', label: 'Calendar', rolesOnly: ['service_manager'] },
     { href: '/manager/staff', label: 'Staff', rolesOnly: ['service_manager'] },
     { href: '/group', label: 'Group', rolesOnly: ['group_manager'] },
 ];

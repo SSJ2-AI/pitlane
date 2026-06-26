@@ -1,87 +1,45 @@
 import { NextResponse } from 'next/server';
+import { DEFAULT_DEALER_ID } from '@/lib/dealer';
 import { recordAudit } from '@/lib/audit';
-import { readSessionFromRequest, type PitLaneSession } from '@/lib/role';
+import { readSessionFromRequest } from '@/lib/role';
 import { getSupabase, type ServiceScheduleRow } from '@/lib/supabase';
 
 export const dynamic = 'force-dynamic';
 
-type ScheduleInput = {
-    day_of_week?: number;
+interface DayConfigInput {
+    day_of_week: number;
     open_time?: string;
     close_time?: string;
     slot_duration_mins?: number;
     max_concurrent_bookings?: number;
     is_active?: boolean;
-};
-
-function dealerIdFromHeaders(session: PitLaneSession): string | null {
-    return session.dealerId || null;
 }
 
-function isAuthenticatedStaff(session: PitLaneSession): boolean {
-    return Boolean(session.userId || process.env.NEXT_PUBLIC_USE_MOCK_DATA === 'true');
+function resolveScopedDealerId(request: Request): string | null {
+    const headerDealer = request.headers.get('x-pitlane-dealer');
+    if (headerDealer && headerDealer.trim().length > 0) return headerDealer.trim();
+    if (process.env.NEXT_PUBLIC_USE_MOCK_DATA === 'true') return DEFAULT_DEALER_ID;
+    return null;
 }
 
-function normalizeTime(value: unknown, fallback: string): string {
-    if (typeof value !== 'string') return fallback;
-    const trimmed = value.trim();
-    return /^\d{2}:\d{2}(:\d{2})?$/.test(trimmed) ? trimmed.slice(0, 5) : fallback;
-}
-
-function normalizeDay(input: ScheduleInput, dealerId: string, userId: string | null): Omit<ServiceScheduleRow, 'id' | 'created_at' | 'updated_at'> {
-    if (typeof input.day_of_week !== 'number' || input.day_of_week < 0 || input.day_of_week > 6) {
-        throw new Error('Each schedule row must include day_of_week 0-6.');
-    }
-    const slotDuration = Number(input.slot_duration_mins ?? 60);
-    const maxConcurrent = Number(input.max_concurrent_bookings ?? 3);
-    if (![30, 60, 90].includes(slotDuration)) {
-        throw new Error('slot_duration_mins must be 30, 60, or 90.');
-    }
-    if (!Number.isInteger(maxConcurrent) || maxConcurrent < 1) {
-        throw new Error('max_concurrent_bookings must be at least 1.');
-    }
-    return {
-        dealer_id: dealerId,
-        day_of_week: input.day_of_week,
-        open_time: normalizeTime(input.open_time, '08:00'),
-        close_time: normalizeTime(input.close_time, '18:00'),
-        slot_duration_mins: slotDuration,
-        max_concurrent_bookings: maxConcurrent,
-        is_active: input.is_active !== false,
-        created_by: userId,
-    };
-}
-
-function mockSchedule(dealerId: string): ServiceScheduleRow[] {
-    const now = new Date().toISOString();
-    return Array.from({ length: 7 }, (_, day) => ({
-        id: `schedule_mock_${day}`,
-        dealer_id: dealerId,
-        day_of_week: day,
-        open_time: day === 0 ? '10:00' : '08:00',
-        close_time: day === 0 ? '16:00' : '18:00',
-        slot_duration_mins: 60,
-        max_concurrent_bookings: 3,
-        is_active: day !== 0,
-        created_by: null,
-        created_at: now,
-        updated_at: now,
-    }));
+function hasRoleHeader(request: Request): boolean {
+    if (process.env.NEXT_PUBLIC_USE_MOCK_DATA === 'true') return true;
+    return Boolean(request.headers.get('x-pitlane-role'));
 }
 
 export async function GET(request: Request) {
-    const session = readSessionFromRequest(request);
-    if (!isAuthenticatedStaff(session)) {
-        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    if (!hasRoleHeader(request)) {
+        return NextResponse.json({ error: 'Unauthorized — missing x-pitlane-role header' }, { status: 401 });
     }
-    const dealerId = dealerIdFromHeaders(session);
+
+    const dealerId = resolveScopedDealerId(request);
     if (!dealerId) {
-        return NextResponse.json({ error: 'x-pitlane-dealer header is required' }, { status: 400 });
+        return NextResponse.json({ error: 'Missing x-pitlane-dealer header' }, { status: 400 });
     }
 
     const supabase = getSupabase();
-    if (!supabase || process.env.NEXT_PUBLIC_USE_MOCK_DATA === 'true') {
-        return NextResponse.json({ schedule: mockSchedule(dealerId), persistence: 'mock' });
+    if (!supabase) {
+        return NextResponse.json({ schedules: [] as ServiceScheduleRow[], persistence: 'mock' });
     }
 
     const { data, error } = await supabase
@@ -91,71 +49,93 @@ export async function GET(request: Request) {
         .order('day_of_week', { ascending: true });
 
     if (error) {
-        const code = (error as { code?: string }).code;
-        if (code === '42P01') {
-            return NextResponse.json({ schedule: [], persistence: 'supabase_pending_migration' });
-        }
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
-    return NextResponse.json({ schedule: (data ?? []) as ServiceScheduleRow[], persistence: 'supabase' });
+    return NextResponse.json({ schedules: (data ?? []) as ServiceScheduleRow[], persistence: 'supabase' });
 }
 
 export async function POST(request: Request) {
-    const session = readSessionFromRequest(request);
-    if (session.role !== 'service_manager') {
-        return NextResponse.json({ error: 'Forbidden — service managers only.' }, { status: 403 });
-    }
-    const dealerId = dealerIdFromHeaders(session);
-    if (!dealerId) {
-        return NextResponse.json({ error: 'x-pitlane-dealer header is required' }, { status: 400 });
+    if (!hasRoleHeader(request)) {
+        return NextResponse.json({ error: 'Unauthorized — missing x-pitlane-role header' }, { status: 401 });
     }
 
-    let body: unknown;
+    const session = readSessionFromRequest(request);
+    if (session.role !== 'service_manager') {
+        return NextResponse.json({ error: 'Forbidden — service_manager role required' }, { status: 403 });
+    }
+
+    const dealerId = resolveScopedDealerId(request);
+    if (!dealerId) {
+        return NextResponse.json({ error: 'Missing x-pitlane-dealer header' }, { status: 400 });
+    }
+
+    let body: DayConfigInput[];
     try {
-        body = await request.json();
+        body = await request.json() as DayConfigInput[];
     } catch {
         return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
     }
+
     if (!Array.isArray(body) || body.length !== 7) {
-        return NextResponse.json({ error: 'Expected an array of 7 day configs.' }, { status: 400 });
+        return NextResponse.json({ error: 'Expected an array of 7 day configs' }, { status: 400 });
     }
 
-    let rows: Array<Omit<ServiceScheduleRow, 'id' | 'created_at' | 'updated_at'>>;
+    const seen = new Set<number>();
+    let rows: Array<Record<string, unknown>>;
     try {
-        rows = body.map((row) => normalizeDay(row as ScheduleInput, dealerId, session.userId));
+        rows = body.map((row) => {
+            if (!Number.isInteger(row.day_of_week) || row.day_of_week < 0 || row.day_of_week > 6) {
+                throw new Error(`Invalid day_of_week: ${row.day_of_week}`);
+            }
+            if (seen.has(row.day_of_week)) {
+                throw new Error(`Duplicate day_of_week: ${row.day_of_week}`);
+            }
+            seen.add(row.day_of_week);
+            return {
+                dealer_id: dealerId,
+                day_of_week: row.day_of_week,
+                open_time: row.open_time ?? '08:00',
+                close_time: row.close_time ?? '18:00',
+                slot_duration_mins: row.slot_duration_mins ?? 60,
+                max_concurrent_bookings: row.max_concurrent_bookings ?? 3,
+                is_active: row.is_active ?? true,
+                created_by: session.userId ?? null,
+                updated_at: new Date().toISOString(),
+            };
+        });
     } catch (err) {
-        return NextResponse.json({ error: err instanceof Error ? err.message : 'Invalid schedule config' }, { status: 400 });
+        return NextResponse.json({ error: err instanceof Error ? err.message : 'Invalid schedule payload' }, { status: 400 });
+    }
+
+    if (seen.size !== 7) {
+        return NextResponse.json({ error: 'All day_of_week values (0-6) must be present exactly once' }, { status: 400 });
     }
 
     const supabase = getSupabase();
-    if (!supabase || process.env.NEXT_PUBLIC_USE_MOCK_DATA === 'true') {
-        const now = new Date().toISOString();
-        return NextResponse.json({
-            schedule: rows.map((row) => ({ id: `schedule_mock_${row.day_of_week}`, ...row, created_at: now, updated_at: now })),
-            persistence: 'mock',
-        });
+    if (!supabase) {
+        return NextResponse.json({ error: 'Supabase not configured' }, { status: 503 });
     }
 
-    const { data, error } = await supabase
-        .from('service_schedule')
-        .upsert(rows, { onConflict: 'dealer_id,day_of_week' })
-        .select('*')
-        .order('day_of_week', { ascending: true });
+    try {
+        const { data, error } = await supabase
+            .from('service_schedule')
+            .upsert(rows, { onConflict: 'dealer_id,day_of_week' })
+            .select('*');
 
-    if (error) {
-        const code = (error as { code?: string }).code;
-        if (code === '42P01') {
-            return NextResponse.json({ error: 'service_schedule table missing — apply migration 0013' }, { status: 503 });
+        if (error) {
+            return NextResponse.json({ error: error.message }, { status: 500 });
         }
-        return NextResponse.json({ error: error.message }, { status: 500 });
+
+        void recordAudit(request, session, {
+            action: 'update_service_schedule',
+            resourceType: 'service_schedule',
+            resourceId: dealerId,
+        });
+
+        const sorted = ((data ?? []) as ServiceScheduleRow[]).sort((a, b) => a.day_of_week - b.day_of_week);
+        return NextResponse.json({ schedules: sorted, persistence: 'supabase' });
+    } catch (err) {
+        return NextResponse.json({ error: err instanceof Error ? err.message : 'Failed to save schedule' }, { status: 400 });
     }
-
-    void recordAudit(request, session, {
-        action: 'update_service_schedule',
-        resourceType: 'service_schedule',
-        resourceId: dealerId,
-    });
-
-    return NextResponse.json({ schedule: (data ?? []) as ServiceScheduleRow[], persistence: 'supabase' });
 }

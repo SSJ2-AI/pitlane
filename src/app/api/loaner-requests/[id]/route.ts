@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server';
 import { getSupabase } from '@/lib/supabase';
-import { resolveDealerForRequest } from '@/lib/dealer';
-import { recordAudit } from '@/lib/audit';
+import { DEFAULT_DEALER_ID } from '@/lib/dealer';
 import { readSessionFromRequest } from '@/lib/role';
+import { recordAudit } from '@/lib/audit';
 
 // PATCH /api/loaner-requests/:id
 //   body: { status: 'approved' | 'declined' | 'fulfilled', resolved_by?, notes? }
@@ -16,13 +16,26 @@ interface RouteContext {
     params: { id: string };
 }
 
+function resolveScopedDealerId(request: Request): string | null {
+    const headerDealer = request.headers.get('x-pitlane-dealer');
+    if (headerDealer && headerDealer.trim().length > 0) return headerDealer.trim();
+    if (process.env.NEXT_PUBLIC_USE_MOCK_DATA === 'true') return DEFAULT_DEALER_ID;
+    return null;
+}
+
+function hasRoleHeader(request: Request): boolean {
+    if (process.env.NEXT_PUBLIC_USE_MOCK_DATA === 'true') return true;
+    return Boolean(request.headers.get('x-pitlane-role'));
+}
+
 export async function PATCH(request: Request, context: RouteContext) {
-    const session = readSessionFromRequest(request);
-    if (!session.userId && process.env.NEXT_PUBLIC_USE_MOCK_DATA !== 'true') {
-        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    if (!hasRoleHeader(request)) {
+        return NextResponse.json({ error: 'Unauthorized — missing x-pitlane-role header' }, { status: 401 });
     }
-    if (!['service_advisor', 'service_manager'].includes(session.role)) {
-        return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+
+    const session = readSessionFromRequest(request);
+    if (session.role !== 'service_manager') {
+        return NextResponse.json({ error: 'Forbidden — service_manager role required' }, { status: 403 });
     }
 
     const supabase = getSupabase();
@@ -53,8 +66,10 @@ export async function PATCH(request: Request, context: RouteContext) {
     }
     if (typeof body.notes === 'string') update.notes = body.notes;
 
-    const dealer = await resolveDealerForRequest(request);
-    const dealerId = session.dealerId || dealer.id;
+    const dealerId = resolveScopedDealerId(request);
+    if (!dealerId) {
+        return NextResponse.json({ error: 'Missing x-pitlane-dealer header' }, { status: 400 });
+    }
 
     const { data, error } = await supabase
         .from('loaner_requests')
@@ -70,12 +85,10 @@ export async function PATCH(request: Request, context: RouteContext) {
     if (!data) {
         return NextResponse.json({ error: 'Loaner request not found' }, { status: 404 });
     }
-
     void recordAudit(request, session, {
-        action: 'update_loaner_request',
+        action: 'loaner_request_updated',
         resourceType: 'loaner_request',
         resourceId: id,
     });
-
     return NextResponse.json({ loaner_request: data });
 }

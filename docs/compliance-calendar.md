@@ -1,25 +1,48 @@
-# PitLane Phase 13 Calendar and Loaner Fleet Compliance
+# Phase 13 Compliance Notes — Internal Calendar & Loaner Fleet
 
-## Data classification
+## Scope
 
-| Table | Data stored | Classification | PII / quasi-PII | Read access | Write access |
-|---|---|---|---|---|---|
-| `service_schedule` | Dealer weekly operating hours, slot duration, concurrent booking capacity, active flag, creator id | Operational metadata | No customer PII | Authenticated active staff for same dealer; group managers read across dealers | Same-dealer `service_manager` only |
-| `schedule_overrides` | Dealer date closures, custom hours, capacity override, reason | Operational metadata | No customer PII. Reasons must not contain customer identifiers. | Authenticated active staff for same dealer; group managers read across dealers | Same-dealer `service_manager` only |
-| `loaner_vehicles` | Dealer loaner make/model/year/color, availability, notes, license plate | Operational fleet data | `license_plate` is quasi-PII because it can be linked to an individual through external records | Authenticated active staff for same dealer; group managers read across dealers | Same-dealer `service_manager` only |
-| `loaner_requests` additions | Assigned loaner vehicle id, customer vehicle id, start date, end date | Customer service workflow data | Links to customer id and loaner vehicle; treat as customer-associated operational data | Existing dealer-scoped service desk and customer/call views | Authenticated dealer staff create; dealer staff resolve per service desk workflow |
+This document covers Phase 13 additions:
+
+- `service_schedule`
+- `schedule_overrides`
+- `loaner_vehicles`
+- `loaner_requests` extensions (`loaner_vehicle_id`, `start_date`, `end_date`)
+
+Supabase project residency target remains **ca-central-1** (`tskczoemkegqbghjedpu`).
+
+## Data Classification
+
+| Table | Data classes | Notes |
+|---|---|---|
+| `service_schedule` | Operational metadata (non-PII) | Day-of-week hours, slot duration, booking caps only. |
+| `schedule_overrides` | Operational metadata (non-PII) | Date-specific closures/hours and optional operational reason text. |
+| `loaner_vehicles` | Operational metadata + quasi-PII | `license_plate` treated as quasi-PII (vehicle-identifying) for dispatch/return operations. |
+| `loaner_requests` (new fields) | Operational scheduling metadata | `loaner_vehicle_id`, `start_date`, `end_date` are operational planning fields; no direct customer identity fields added in this phase. |
+
+> PIPEDA minimization statement applied in migration comments:  
+> **"No PII stored in schedule tables. PIPEDA s.4.4 data minimization compliant."**
+
+## Access Model (Read/Write)
+
+| Table | Read | Write |
+|---|---|---|
+| `service_schedule` | Staff in same dealer OR `group_manager` | `service_manager` in same dealer |
+| `schedule_overrides` | Staff in same dealer OR `group_manager` | `service_manager` in same dealer |
+| `loaner_vehicles` | Staff in same dealer OR `group_manager` | `service_manager` in same dealer |
+| `loaner_requests` API writes | Authenticated PitLane staff roles (server-validated `x-pitlane-role`) | Role + dealer scope enforced server-side; write operations are audited |
+
+All new Phase 13 tables have **RLS enabled** with explicit policies.
 
 ## Retention
 
-- `service_schedule` and `schedule_overrides`: retain while operationally relevant; stale overrides may be purged after the dealership confirms they are no longer needed for historical capacity review.
-- `loaner_vehicles`: retain while the vehicle is in fleet. Soft-deleted vehicles are marked `is_available=false`; purge only after downstream references are no longer needed.
-- `loaner_requests`: resolved requests older than 2 years can be purged under PIPEDA data minimization principles.
+- `loaner_requests` rows with resolved statuses older than **2 years** are eligible for purge under data minimization policy.
+- Schedule and fleet metadata follow operational retention unless superseded by legal hold or dealership policy.
 
-## Controls
+## SOC 2 / Security Control Mapping
 
-- Row Level Security is enabled on every new table with same-dealer staff read policies and same-dealer service-manager write policies.
-- All new dashboard API routes validate `x-pitlane-role` and `x-pitlane-dealer` server-side before reads or writes.
-- Every write route records an `audit_log` entry, and database triggers also audit direct table mutations for the new schedule/fleet tables.
-- Supabase remains the data residency anchor and must stay in `ca-central-1` for project `tskczoemkegqbghjedpu`.
-- Supabase provides AES-256 encryption at rest for stored data.
-- No PII is stored in `service_schedule` or `schedule_overrides`; this satisfies PIPEDA s.4.4 data minimization for schedule configuration.
+- **Logical access control:** Supabase RLS policies for all new tables.
+- **Server-side authorization:** API routes validate role from `x-pitlane-role` header on the server (not client-only gating).
+- **Audit trail:** write paths and DB triggers append audit records to `audit_log`.
+- **Data residency:** Supabase storage anchored in **ca-central-1**.
+- **Encryption at rest:** Supabase managed encryption (AES-256 at rest).

@@ -1,66 +1,49 @@
 import { NextResponse } from 'next/server';
+import { DEFAULT_DEALER_ID } from '@/lib/dealer';
 import { recordAudit } from '@/lib/audit';
-import { readSessionFromRequest, type PitLaneSession } from '@/lib/role';
+import { readSessionFromRequest } from '@/lib/role';
 import { getSupabase, type ScheduleOverrideRow } from '@/lib/supabase';
 
 export const dynamic = 'force-dynamic';
 
-type OverrideInput = {
+interface OverrideInput {
     override_date?: string;
     is_blocked?: boolean;
     reason?: string | null;
     open_time?: string | null;
     close_time?: string | null;
     max_concurrent_bookings?: number | null;
-};
+}
 
-function dealerIdFromHeaders(session: PitLaneSession): string | null {
-    return session.dealerId || null;
+function resolveScopedDealerId(request: Request): string | null {
+    const headerDealer = request.headers.get('x-pitlane-dealer');
+    if (headerDealer && headerDealer.trim().length > 0) return headerDealer.trim();
+    if (process.env.NEXT_PUBLIC_USE_MOCK_DATA === 'true') return DEFAULT_DEALER_ID;
+    return null;
+}
+
+function hasRoleHeader(request: Request): boolean {
+    if (process.env.NEXT_PUBLIC_USE_MOCK_DATA === 'true') return true;
+    return Boolean(request.headers.get('x-pitlane-role'));
 }
 
 function todayIso(): string {
     return new Date().toISOString().slice(0, 10);
 }
 
-function isIsoDate(value: string | undefined): value is string {
-    return Boolean(value && /^\d{4}-\d{2}-\d{2}$/.test(value));
-}
-
-function normalizeTime(value: unknown): string | null {
-    if (value === null || value === undefined || value === '') return null;
-    if (typeof value !== 'string') return null;
-    const trimmed = value.trim();
-    return /^\d{2}:\d{2}(:\d{2})?$/.test(trimmed) ? trimmed.slice(0, 5) : null;
-}
-
-function mockOverrides(dealerId: string): ScheduleOverrideRow[] {
-    return [{
-        id: 'override_mock_closed',
-        dealer_id: dealerId,
-        override_date: todayIso(),
-        is_blocked: true,
-        reason: 'Demo closure',
-        open_time: null,
-        close_time: null,
-        max_concurrent_bookings: null,
-        created_by: null,
-        created_at: new Date().toISOString(),
-    }];
-}
-
 export async function GET(request: Request) {
-    const session = readSessionFromRequest(request);
-    if (!session.userId && process.env.NEXT_PUBLIC_USE_MOCK_DATA !== 'true') {
-        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    if (!hasRoleHeader(request)) {
+        return NextResponse.json({ error: 'Unauthorized — missing x-pitlane-role header' }, { status: 401 });
     }
-    const dealerId = dealerIdFromHeaders(session);
+
+    const dealerId = resolveScopedDealerId(request);
     if (!dealerId) {
-        return NextResponse.json({ error: 'x-pitlane-dealer header is required' }, { status: 400 });
+        return NextResponse.json({ error: 'Missing x-pitlane-dealer header' }, { status: 400 });
     }
 
     const supabase = getSupabase();
-    if (!supabase || process.env.NEXT_PUBLIC_USE_MOCK_DATA === 'true') {
-        return NextResponse.json({ overrides: mockOverrides(dealerId), persistence: 'mock' });
+    if (!supabase) {
+        return NextResponse.json({ overrides: [] as ScheduleOverrideRow[], persistence: 'mock' });
     }
 
     const { data, error } = await supabase
@@ -71,10 +54,6 @@ export async function GET(request: Request) {
         .order('override_date', { ascending: true });
 
     if (error) {
-        const code = (error as { code?: string }).code;
-        if (code === '42P01') {
-            return NextResponse.json({ overrides: [], persistence: 'supabase_pending_migration' });
-        }
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
@@ -82,72 +61,63 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+    if (!hasRoleHeader(request)) {
+        return NextResponse.json({ error: 'Unauthorized — missing x-pitlane-role header' }, { status: 401 });
+    }
+
     const session = readSessionFromRequest(request);
     if (session.role !== 'service_manager') {
-        return NextResponse.json({ error: 'Forbidden — service managers only.' }, { status: 403 });
+        return NextResponse.json({ error: 'Forbidden — service_manager role required' }, { status: 403 });
     }
-    const dealerId = dealerIdFromHeaders(session);
+
+    const dealerId = resolveScopedDealerId(request);
     if (!dealerId) {
-        return NextResponse.json({ error: 'x-pitlane-dealer header is required' }, { status: 400 });
+        return NextResponse.json({ error: 'Missing x-pitlane-dealer header' }, { status: 400 });
     }
 
     let body: OverrideInput;
     try {
-        body = (await request.json()) as OverrideInput;
+        body = await request.json() as OverrideInput;
     } catch {
         return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
     }
-    if (!isIsoDate(body.override_date)) {
-        return NextResponse.json({ error: 'override_date must be YYYY-MM-DD.' }, { status: 400 });
-    }
-    const isBlocked = body.is_blocked === true;
-    const openTime = isBlocked ? null : normalizeTime(body.open_time);
-    const closeTime = isBlocked ? null : normalizeTime(body.close_time);
-    if (!isBlocked && (!openTime || !closeTime)) {
-        return NextResponse.json({ error: 'Custom hours require open_time and close_time.' }, { status: 400 });
-    }
-    const maxConcurrent = body.max_concurrent_bookings == null ? null : Number(body.max_concurrent_bookings);
-    if (maxConcurrent !== null && (!Number.isInteger(maxConcurrent) || maxConcurrent < 1)) {
-        return NextResponse.json({ error: 'max_concurrent_bookings must be at least 1.' }, { status: 400 });
+
+    if (!body.override_date) {
+        return NextResponse.json({ error: 'override_date is required' }, { status: 400 });
     }
 
-    const insert = {
-        dealer_id: dealerId,
-        override_date: body.override_date,
-        is_blocked: isBlocked,
-        reason: typeof body.reason === 'string' ? body.reason.trim() || null : null,
-        open_time: openTime,
-        close_time: closeTime,
-        max_concurrent_bookings: maxConcurrent,
-        created_by: session.userId,
-    };
+    if (body.is_blocked === false && (!body.open_time || !body.close_time)) {
+        return NextResponse.json({ error: 'open_time and close_time are required for custom-hour overrides' }, { status: 400 });
+    }
 
     const supabase = getSupabase();
-    if (!supabase || process.env.NEXT_PUBLIC_USE_MOCK_DATA === 'true') {
-        return NextResponse.json({
-            override: { id: `override_mock_${Date.now().toString(36)}`, ...insert, created_at: new Date().toISOString() },
-            persistence: 'mock',
-        });
+    if (!supabase) {
+        return NextResponse.json({ error: 'Supabase not configured' }, { status: 503 });
     }
 
     const { data, error } = await supabase
         .from('schedule_overrides')
-        .upsert(insert, { onConflict: 'dealer_id,override_date' })
+        .insert({
+            dealer_id: dealerId,
+            override_date: body.override_date,
+            is_blocked: body.is_blocked ?? false,
+            reason: body.reason ?? null,
+            open_time: body.is_blocked ? null : (body.open_time ?? null),
+            close_time: body.is_blocked ? null : (body.close_time ?? null),
+            max_concurrent_bookings: body.max_concurrent_bookings ?? null,
+            created_by: session.userId ?? null,
+        })
         .select('*')
         .single();
 
     if (error) {
-        const code = (error as { code?: string }).code;
-        if (code === '42P01') {
-            return NextResponse.json({ error: 'schedule_overrides table missing — apply migration 0013' }, { status: 503 });
-        }
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
     void recordAudit(request, session, {
         action: 'create_schedule_override',
         resourceType: 'schedule_override',
-        resourceId: (data as ScheduleOverrideRow | null)?.id ?? null,
+        resourceId: (data as { id?: string } | null)?.id ?? null,
     });
 
     return NextResponse.json({ override: data as ScheduleOverrideRow, persistence: 'supabase' });

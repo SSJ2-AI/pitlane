@@ -120,33 +120,6 @@ export interface AppointmentRow {
     created_at: string;
 }
 
-export interface ServiceScheduleRow {
-    id: string;
-    dealer_id: string;
-    day_of_week: number;
-    open_time: string;
-    close_time: string;
-    slot_duration_mins: number;
-    max_concurrent_bookings: number;
-    is_active: boolean;
-    created_by: string | null;
-    created_at: string;
-    updated_at: string;
-}
-
-export interface ScheduleOverrideRow {
-    id: string;
-    dealer_id: string;
-    override_date: string;
-    is_blocked: boolean;
-    reason: string | null;
-    open_time: string | null;
-    close_time: string | null;
-    max_concurrent_bookings: number | null;
-    created_by: string | null;
-    created_at: string;
-}
-
 export interface UpsellRow {
     id: string;
     call_log_id: string | null;
@@ -255,16 +228,42 @@ export interface LoanerRequestRow {
     appointment_id: string | null;
     customer_id: string;
     dealer_id: string | null;
-    vehicle_id?: string | null;
-    loaner_vehicle_id?: string | null;
-    start_date?: string | null;
-    end_date?: string | null;
     requested_date: string | null;
     loaner_preferred: string | null;
+    loaner_vehicle_id: string | null;
+    start_date: string | null;
+    end_date: string | null;
     status: string;
     notes: string | null;
     resolved_by: string | null;
     resolved_at: string | null;
+    created_at: string;
+}
+
+export interface ServiceScheduleRow {
+    id: string;
+    dealer_id: string;
+    day_of_week: number;
+    open_time: string;
+    close_time: string;
+    slot_duration_mins: number;
+    max_concurrent_bookings: number;
+    is_active: boolean;
+    created_by: string | null;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface ScheduleOverrideRow {
+    id: string;
+    dealer_id: string;
+    override_date: string;
+    is_blocked: boolean;
+    reason: string | null;
+    open_time: string | null;
+    close_time: string | null;
+    max_concurrent_bookings: number | null;
+    created_by: string | null;
     created_at: string;
 }
 
