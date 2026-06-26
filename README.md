@@ -318,6 +318,7 @@ Railway service hasn't picked up the latest main. Fix:
 | `warranty` | `GET /tools/warranty/:vehicle_id` | Factory + CPO expiry, open recalls. Mock-derived today, Fortellis Vehicle API in Phase 3. |
 | `check_ro_status` | `POST GET /tools/check-ro-status` | Legacy lookup of open RO by customer or RO number (`repair_eta` is the preferred replacement). |
 | `send_sms` | `POST GET /tools/send-sms` | Sends a transactional SMS to the caller via Twilio. `message_type` selects one of seven templates; `custom_text` overrides. |
+| `available_slots` | `GET /tools/available-slots` | Phase 13 — returns the next ≤10 concrete bookable slots `[{ date, time, label }]` from `service_schedule` + `schedule_overrides`, minus dates / slots already at `max_concurrent_bookings`. Query params: `dealer_id`, `date_from=YYYY-MM-DD`, `days` (1..30, default 7). When the dealer has no schedule configured returns `{ slots: [], message: 'No schedule configured' }`; on query failure returns `{ slots: [], error: 'Schedule unavailable' }` so Aria can fall back to the legacy open-ended booking flow. |
 
 All tools accept `call_id` (the ElevenLabs conversation id) so the resulting Supabase row is FK-linked back to the right `call_logs.id`. The pre-call webhook will have already opened the `call_logs` row; the tools resolve the conversation_id via `getOrCreateCallLogIdForConversation`.
 
