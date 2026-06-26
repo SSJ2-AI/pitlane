@@ -34,6 +34,15 @@ export interface ProcessPostCallInput {
   startedAt?: string
   /** Multi-tenancy: dealer that owns this call. Defaults to DEFAULT_DEALER. */
   dealer?: Dealer | null
+  /** ElevenLabs' built-in post-call analysis (when configured on the
+   *  agent). When provided we use transcript_summary as the summary_text
+   *  fallback for the call_logs row — preferring the EL-side summary
+   *  over the heuristic one because it's already a paid feature. */
+  elevenLabsAnalysis?: {
+    transcript_summary?: string
+    call_summary_title?: string
+    sentiment?: string
+  } | null
 }
 
 export interface ProcessPostCallResult {
@@ -72,10 +81,23 @@ export async function processPostCall(input: ProcessPostCallInput): Promise<Proc
 
   // Phase 9a: run the summariser + sentiment scorer in parallel. They're
   // independent OpenAI calls; we don't want to serialise the round-trip.
-  const [summary, sentimentScore] = await Promise.all([
+  const [summaryRaw, sentimentScore] = await Promise.all([
     summariseTranscript(input.transcript),
     scoreSentiment(input.transcript),
   ])
+
+  // Prefer ElevenLabs' built-in analysis transcript_summary when our own
+  // summariser returned the heuristic fallback (i.e. OPENAI_API_KEY is
+  // unset OR the call failed). EL's analysis is already paid for and
+  // beats keyword-matching on quality. We only overwrite summary_text;
+  // outcome / topics / loaner_needed etc. still come from our pipeline
+  // because they drive workflow side-effects the EL summary doesn't
+  // know about.
+  const elSummary = input.elevenLabsAnalysis?.transcript_summary?.trim()
+  const summary =
+    elSummary && summaryRaw.generated_by === 'heuristic'
+      ? { ...summaryRaw, summary_text: elSummary }
+      : summaryRaw
 
   const callLogId = await upsertCallLog({
     call_sid: input.callSid ?? null,

@@ -404,6 +404,29 @@ interface PostCallTranscriptTurn {
   timestamp?: number
 }
 
+/** ElevenLabs post-call analysis block, ride-along to the transcript. Fields
+ *  are best-effort — older configs omit `analysis` entirely, which is fine;
+ *  we fall back to the in-house summariser. When `analysis` IS present we
+ *  log it for visibility and pass `transcript_summary` through as the
+ *  call_logs.summary fallback so the dashboard always shows something. */
+interface PostCallAnalysisShape {
+  transcript_summary?: string
+  call_summary_title?: string
+  call_successful?: string
+  evaluation_criteria_results?: Record<string, unknown>
+  data_collection_results?: Record<string, unknown>
+  sentiment?: string
+}
+
+/** ElevenLabs wraps the initiation client_data we returned from the
+ *  pre-call webhook back into the post-call payload. The most reliable
+ *  caller-id source on numbers that ship via SIP without ANI is
+ *  conversation_initiation_client_data.dynamic_variables.caller_id (which
+ *  we ourselves populate during pre-call). */
+interface PostCallInitiationShape {
+  dynamic_variables?: Record<string, string | number | boolean | null | undefined>
+}
+
 /** Either-shape ElevenLabs payload. Production wraps everything under
  *  `data`, legacy / synthetic fixtures ship the fields at the top level. */
 interface PostCallDataShape {
@@ -422,9 +445,11 @@ interface PostCallDataShape {
       internal_number?: string
     }
   }
+  conversation_initiation_client_data?: PostCallInitiationShape
   transcript?: PostCallTranscriptTurn[]
   status?: string
   summary?: string
+  analysis?: PostCallAnalysisShape
 }
 
 interface PostCallRequestBody extends PostCallDataShape {
@@ -471,20 +496,33 @@ router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Re
     ?? body.call_id
     ?? null
   const callSid = envelope.call_sid ?? body.call_sid ?? null
+
+  // ElevenLabs caller-id resolution order (in priority):
+  //   1. explicit top-level `caller_phone` (legacy / test fixtures)
+  //   2. metadata.phone_call.external_number (Twilio inbound — production)
+  //   3. conversation_initiation_client_data.dynamic_variables.caller_id
+  //      (SIP trunks where Twilio ANI isn't surfaced; we populate this
+  //      ourselves in the pre-call webhook so it's always available when
+  //      the caller's phone was known at start-of-call)
+  const dynamicCallerId =
+    envelope.conversation_initiation_client_data?.dynamic_variables?.caller_id
+    ?? body.conversation_initiation_client_data?.dynamic_variables?.caller_id
   const callerPhone = (
     envelope.caller_phone
     ?? envelope.metadata?.phone_call?.external_number
     ?? body.caller_phone
     ?? body.metadata?.phone_call?.external_number
-    ?? ''
-  ).trim()
+    ?? (typeof dynamicCallerId === 'string' || typeof dynamicCallerId === 'number'
+        ? String(dynamicCallerId)
+        : '')
+  ).toString().trim()
   const duration =
-    envelope.duration_secs
+    envelope.call_duration_secs
+    ?? envelope.duration_secs
     ?? envelope.duration_seconds
-    ?? envelope.call_duration_secs
+    ?? body.call_duration_secs
     ?? body.duration_secs
     ?? body.duration_seconds
-    ?? body.call_duration_secs
     ?? 0
   const status = normaliseStatus(envelope.status ?? body.status)
   const transcript = normaliseTranscript(envelope.transcript ?? body.transcript)
@@ -496,9 +534,24 @@ router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Re
     ?? body.metadata?.phone_call?.to_number
     ?? null
 
+  // ElevenLabs' built-in post-call analysis. When present we prefer its
+  // transcript_summary as the source of truth for call_logs.summary —
+  // it's already paid for via the agent subscription and tends to be
+  // higher quality than the heuristic fallback. The full processPostCall
+  // pipeline still runs (sentiment scorer, loaner detection, etc.) but
+  // gets the EL-provided summary text injected when our own LLM call
+  // isn't configured.
+  const analysis = envelope.analysis ?? body.analysis ?? null
+
   // Per Phase 8b spec — single debug log line capturing the parsed fields
   // so a Railway tail can immediately confirm the unwrap worked.
-  console.log('[post-call] received', { caller_phone: callerPhone, duration })
+  console.log('[post-call] received', {
+    caller_phone: callerPhone,
+    conversation_id: conversationId,
+    duration,
+    transcript_turns: transcript.length,
+    has_analysis: Boolean(analysis),
+  })
 
   const dealer = await getDealerByPhone(calledNumber)
 
@@ -508,9 +561,11 @@ router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Re
     `status=${status} turns=${transcript.length} envelope=${envelope === body ? 'flat' : 'wrapped'}`,
   )
 
-  // Phase 8b auto-create: stamp / bump the customers index for this phone
-  // so brand-new callers show up on the /customers page even before they're
-  // matched to a CDK record. No-op when Supabase isn't configured.
+  // Phase 8b auto-create: INSERT ... ON CONFLICT DO NOTHING upsert into
+  // the customers table keyed by phone + dealer. This guarantees every
+  // call we receive has an associated customers row (so the /customers
+  // page lists them) even when they're not yet in CDK. The upsert is
+  // idempotent — a row already keyed by (dealer_id, phone) is a no-op.
   if (callerPhone && isSupabaseConfigured()) {
     void upsertCustomerByPhone({
       phone: callerPhone,
@@ -529,6 +584,13 @@ router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Re
     transcript,
     status,
     dealer,
+    elevenLabsAnalysis: analysis
+      ? {
+          transcript_summary: analysis.transcript_summary,
+          call_summary_title: analysis.call_summary_title,
+          sentiment: analysis.sentiment,
+        }
+      : null,
   })
 
   return res.json({
