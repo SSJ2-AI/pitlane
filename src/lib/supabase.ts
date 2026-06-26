@@ -235,4 +235,56 @@ export interface LoanerRequestRow {
     resolved_by: string | null;
     resolved_at: string | null;
     created_at: string;
+    /** Phase 13 (migration 0014): assigned loaner vehicle + planned dates. */
+    loaner_vehicle_id?: string | null;
+    start_date?: string | null;
+    end_date?: string | null;
+}
+
+/** Phase 13 — service_schedule row (migration 0013). */
+export interface ServiceScheduleRow {
+    id: string;
+    dealer_id: string;
+    day_of_week: number;
+    open_time: string;
+    close_time: string;
+    slot_duration_mins: number;
+    max_concurrent_bookings: number;
+    is_active: boolean;
+    created_by: string | null;
+    created_at: string;
+    updated_at: string;
+}
+
+/** Phase 13 — schedule_overrides row (migration 0013). */
+export interface ScheduleOverrideRow {
+    id: string;
+    dealer_id: string;
+    override_date: string;
+    is_blocked: boolean;
+    reason: string | null;
+    open_time: string | null;
+    close_time: string | null;
+    max_concurrent_bookings: number | null;
+    created_by: string | null;
+    created_at: string;
+}
+
+/** Phase 13 — loaner_vehicles row (migration 0014).
+ *
+ *  license_plate is QUASI-PII; never expose outside staff-only surfaces or
+ *  send over outbound SMS / CDK sync payloads. See migration 0014 comment.
+ */
+export interface LoanerVehicleRow {
+    id: string;
+    dealer_id: string;
+    make: string;
+    model: string;
+    year: number;
+    license_plate: string;
+    color: string | null;
+    is_available: boolean;
+    notes: string | null;
+    created_at: string;
+    updated_at: string;
 }

@@ -26,7 +26,15 @@ export type AuditAction =
     | 'deactivate_staff'
     | 'activate_staff'
     | 'revoke_session'
-    | 'view_group_summary';
+    | 'view_group_summary'
+    // Phase 13 — internal calendar + loaner fleet
+    | 'save_service_schedule'
+    | 'create_schedule_override'
+    | 'delete_schedule_override'
+    | 'create_loaner_vehicle'
+    | 'update_loaner_vehicle'
+    | 'delete_loaner_vehicle'
+    | 'loaner_request_created';
 
 export interface AuditEntry {
     action: AuditAction;
