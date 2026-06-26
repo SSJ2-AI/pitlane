@@ -2,8 +2,9 @@
 
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
+import { LoanerRequestModal } from '@/components/LoanerRequestModal';
 import type { CustomerDetailPayload } from '@/app/api/customers/[id]/route';
 
 const TIER_STYLES: Record<string, string> = {
@@ -42,6 +43,16 @@ export default function CustomerDetailPage() {
     const [data, setData] = useState<CustomerDetailPayload | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [loanerOpen, setLoanerOpen] = useState(false);
+    const [loanerToast, setLoanerToast] = useState<string | null>(null);
+
+    const vehicleOptions = useMemo(() => {
+        if (!data) return [] as Array<{ id: string; label: string }>;
+        return data.vehicles.map((v) => ({
+            id: v.id,
+            label: `${v.year} ${v.make} ${v.model}${v.trim ? ` ${v.trim}` : ''}`,
+        }));
+    }, [data]);
 
     const load = useCallback(async () => {
         if (!customerId) return;
@@ -118,7 +129,13 @@ export default function CustomerDetailPage() {
                             ← All customers
                         </Link>
 
-                        <CustomerHeader data={data} />
+                        <CustomerHeader data={data} onRequestLoaner={() => setLoanerOpen(true)} />
+
+                        {loanerToast && (
+                            <div className="mt-4 rounded-2xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
+                                {loanerToast}
+                            </div>
+                        )}
 
                         <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
                             <VehiclesPanel data={data} />
@@ -127,11 +144,25 @@ export default function CustomerDetailPage() {
                     </>
                 )}
             </section>
+
+            {data && (
+                <LoanerRequestModal
+                    open={loanerOpen}
+                    onClose={() => setLoanerOpen(false)}
+                    customerId={data.customer.id}
+                    customerName={data.customer.name}
+                    vehicles={vehicleOptions}
+                    onSuccess={() => {
+                        setLoanerToast('Loaner request submitted — service desk will confirm.');
+                        window.setTimeout(() => setLoanerToast(null), 5000);
+                    }}
+                />
+            )}
         </main>
     );
 }
 
-function CustomerHeader({ data }: { data: CustomerDetailPayload }) {
+function CustomerHeader({ data, onRequestLoaner }: { data: CustomerDetailPayload; onRequestLoaner: () => void }) {
     const c = data.customer;
     return (
         <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-6 shadow-xl shadow-black/25">
@@ -170,6 +201,13 @@ function CustomerHeader({ data }: { data: CustomerDetailPayload }) {
                 >
                     View full call history →
                 </Link>
+                <button
+                    type="button"
+                    onClick={onRequestLoaner}
+                    className="rounded-2xl border border-zinc-700 bg-zinc-950 px-4 py-2 text-sm font-bold uppercase tracking-[0.18em] text-zinc-200 transition hover:border-red-500 hover:text-white"
+                >
+                    Request loaner
+                </button>
                 <span className="rounded-full border border-zinc-700 bg-zinc-950 px-3 py-2 text-[10px] font-bold uppercase tracking-[0.22em] text-zinc-400">
                     {data.recent_calls.length} call{data.recent_calls.length === 1 ? '' : 's'} from {data.persistence === 'supabase' ? 'Supabase' : 'mock'}
                 </span>
