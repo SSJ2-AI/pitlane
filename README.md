@@ -311,6 +311,7 @@ Railway service hasn't picked up the latest main. Fix:
 | Tool | Method + path | Purpose |
 |---|---|---|
 | `customer_lookup` | `GET POST /tools/customer-lookup` | Legacy mid-call ID fallback; superseded by `/webhook/pre-call` for new agents. |
+| `check_available_slots` | `GET /tools/available-slots?dealer_id=&date_from=YYYY-MM-DD&days=7` | Reads `service_schedule` and `schedule_overrides`, applies appointment capacity, and returns the first 10 `{date,time,label}` options. |
 | `book_appointment` | `POST GET /tools/book-appointment` | Books an appointment, writes to `appointments`, queues a `cdk_sync_queue` row. Returns `{confirmed, confirmation_number, advisor, duration_est_hours}`. |
 | `log_upsell` | `POST GET /tools/log-upsell` | Records an upsell against the customer + call, returns `{logged, upsell_id}`. |
 | `request_loaner` | `POST GET /tools/request-loaner` | Adds a pending loaner request the service desk approves, returns `{requested, status, loaner_id}`. |

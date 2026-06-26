@@ -113,6 +113,7 @@ app.get('/health', (_req, res) => {
       post_call_webhook: '/webhook/post-call',
       tools: [
         '/tools/customer-lookup',
+        '/tools/available-slots',
         '/tools/book-appointment',
         '/tools/log-upsell',
         '/tools/request-loaner',

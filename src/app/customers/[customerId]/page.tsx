@@ -3,8 +3,10 @@
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
+import type { FormEvent } from 'react';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
 import type { CustomerDetailPayload } from '@/app/api/customers/[id]/route';
+import type { LoanerVehicleRow } from '@/lib/supabase';
 
 const TIER_STYLES: Record<string, string> = {
     Bronze: 'border-orange-500/40 bg-orange-500/10 text-orange-200',
@@ -42,6 +44,8 @@ export default function CustomerDetailPage() {
     const [data, setData] = useState<CustomerDetailPayload | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [loanerOpen, setLoanerOpen] = useState(false);
+    const [toast, setToast] = useState<string | null>(null);
 
     const load = useCallback(async () => {
         if (!customerId) return;
@@ -118,12 +122,29 @@ export default function CustomerDetailPage() {
                             ← All customers
                         </Link>
 
-                        <CustomerHeader data={data} />
+                        {toast && (
+                            <div className="mb-4 rounded-2xl border border-emerald-500/40 bg-emerald-500/10 px-5 py-4 text-sm text-emerald-100">
+                                {toast}
+                            </div>
+                        )}
+
+                        <CustomerHeader data={data} onRequestLoaner={() => setLoanerOpen(true)} />
 
                         <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
                             <VehiclesPanel data={data} />
                             <SidebarPanel data={data} />
                         </div>
+
+                        {loanerOpen && (
+                            <LoanerRequestModal
+                                data={data}
+                                onClose={() => setLoanerOpen(false)}
+                                onSuccess={() => {
+                                    setLoanerOpen(false);
+                                    setToast('Loaner request submitted — service desk will confirm');
+                                }}
+                            />
+                        )}
                     </>
                 )}
             </section>
@@ -131,7 +152,7 @@ export default function CustomerDetailPage() {
     );
 }
 
-function CustomerHeader({ data }: { data: CustomerDetailPayload }) {
+function CustomerHeader({ data, onRequestLoaner }: { data: CustomerDetailPayload; onRequestLoaner: () => void }) {
     const c = data.customer;
     return (
         <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-6 shadow-xl shadow-black/25">
@@ -173,8 +194,167 @@ function CustomerHeader({ data }: { data: CustomerDetailPayload }) {
                 <span className="rounded-full border border-zinc-700 bg-zinc-950 px-3 py-2 text-[10px] font-bold uppercase tracking-[0.22em] text-zinc-400">
                     {data.recent_calls.length} call{data.recent_calls.length === 1 ? '' : 's'} from {data.persistence === 'supabase' ? 'Supabase' : 'mock'}
                 </span>
+                <button
+                    type="button"
+                    onClick={onRequestLoaner}
+                    className="rounded-2xl border border-zinc-700 bg-zinc-950 px-4 py-2 text-sm font-bold uppercase tracking-[0.18em] text-zinc-200 transition hover:border-red-500 hover:text-white"
+                >
+                    Request Loaner
+                </button>
             </div>
         </section>
+    );
+}
+
+function addDaysIso(iso: string, days: number): string {
+    const d = new Date(`${iso}T00:00:00`);
+    d.setDate(d.getDate() + days);
+    return d.toISOString().slice(0, 10);
+}
+
+function defaultStartDate(): string {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    return d.toISOString().slice(0, 10);
+}
+
+function LoanerRequestModal({
+    data,
+    onClose,
+    onSuccess,
+}: {
+    data: CustomerDetailPayload;
+    onClose: () => void;
+    onSuccess: () => void;
+}) {
+    const initialStart = defaultStartDate();
+    const [vehicleId, setVehicleId] = useState(data.vehicles[0]?.id ?? '');
+    const [startDate, setStartDate] = useState(initialStart);
+    const [endDate, setEndDate] = useState(addDaysIso(initialStart, 3));
+    const [loaners, setLoaners] = useState<LoanerVehicleRow[]>([]);
+    const [loanerVehicleId, setLoanerVehicleId] = useState('');
+    const [notes, setNotes] = useState('');
+    const [loadingLoaners, setLoadingLoaners] = useState(false);
+    const [submitting, setSubmitting] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    useEffect(() => {
+        let cancelled = false;
+        async function loadAvailableLoaners() {
+            setLoadingLoaners(true);
+            setError(null);
+            try {
+                const params = new URLSearchParams({ available_from: startDate, available_to: endDate });
+                const r = await fetch(`/api/manager/loaners/vehicles?${params.toString()}`, { cache: 'no-store' });
+                const body = (await r.json()) as { vehicles?: LoanerVehicleRow[]; error?: string };
+                if (!r.ok) throw new Error(body.error ?? `HTTP ${r.status}`);
+                if (!cancelled) {
+                    const rows = body.vehicles ?? [];
+                    setLoaners(rows);
+                    setLoanerVehicleId((current) => (rows.some((row) => row.id === current) ? current : rows[0]?.id ?? ''));
+                }
+            } catch (err) {
+                if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load available loaners');
+            } finally {
+                if (!cancelled) setLoadingLoaners(false);
+            }
+        }
+        void loadAvailableLoaners();
+        return () => {
+            cancelled = true;
+        };
+    }, [endDate, startDate]);
+
+    async function submit(event: FormEvent<HTMLFormElement>) {
+        event.preventDefault();
+        setSubmitting(true);
+        setError(null);
+        try {
+            const r = await fetch('/api/loaner-requests', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    customer_id: data.customer.id,
+                    dealer_id: data.dealer.id,
+                    vehicle_id: vehicleId || null,
+                    loaner_vehicle_id: loanerVehicleId || null,
+                    start_date: startDate,
+                    end_date: endDate,
+                    notes,
+                }),
+            });
+            const body = (await r.json()) as { error?: string };
+            if (!r.ok) throw new Error(body.error ?? `HTTP ${r.status}`);
+            onSuccess();
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Failed to submit loaner request');
+        } finally {
+            setSubmitting(false);
+        }
+    }
+
+    return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6">
+            <form onSubmit={submit} className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-3xl border border-zinc-800 bg-zinc-950 p-6 shadow-2xl shadow-black">
+                <div className="flex items-start justify-between gap-4">
+                    <div>
+                        <p className="text-xs font-bold uppercase tracking-[0.24em] text-red-400">Loaner request</p>
+                        <h3 className="mt-2 text-2xl font-black text-white">Request loaner vehicle</h3>
+                    </div>
+                    <button type="button" onClick={onClose} className="rounded-full border border-zinc-700 px-3 py-1 text-sm text-zinc-300 hover:border-red-500 hover:text-white">Close</button>
+                </div>
+
+                {error && <div className="mt-4 rounded-2xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-100">{error}</div>}
+
+                <div className="mt-5 grid gap-4 sm:grid-cols-2">
+                    <label className="block text-xs font-bold uppercase tracking-[0.2em] text-zinc-500">
+                        Customer
+                        <input readOnly value={data.customer.name} className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm normal-case tracking-normal text-zinc-300" />
+                    </label>
+                    <label className="block text-xs font-bold uppercase tracking-[0.2em] text-zinc-500">
+                        Customer vehicle
+                        <select value={vehicleId} onChange={(e) => setVehicleId(e.target.value)} className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm normal-case tracking-normal text-white outline-none focus:border-red-500">
+                            {data.vehicles.map((vehicle) => (
+                                <option key={vehicle.id} value={vehicle.id}>
+                                    {vehicle.year} {vehicle.make} {vehicle.model}
+                                </option>
+                            ))}
+                            {data.vehicles.length === 0 && <option value="">No vehicle selected</option>}
+                        </select>
+                    </label>
+                    <label className="block text-xs font-bold uppercase tracking-[0.2em] text-zinc-500">
+                        Start date
+                        <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm normal-case tracking-normal text-white outline-none focus:border-red-500" />
+                    </label>
+                    <label className="block text-xs font-bold uppercase tracking-[0.2em] text-zinc-500">
+                        Est. return date
+                        <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm normal-case tracking-normal text-white outline-none focus:border-red-500" />
+                    </label>
+                    <label className="block text-xs font-bold uppercase tracking-[0.2em] text-zinc-500 sm:col-span-2">
+                        Available loaner
+                        <select value={loanerVehicleId} onChange={(e) => setLoanerVehicleId(e.target.value)} disabled={loadingLoaners || loaners.length === 0} className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm normal-case tracking-normal text-white outline-none focus:border-red-500 disabled:text-zinc-500">
+                            {loaners.length === 0 ? (
+                                <option value="">Vehicle will be assigned by service team</option>
+                            ) : (
+                                loaners.map((loaner) => (
+                                    <option key={loaner.id} value={loaner.id}>
+                                        {loaner.year} {loaner.make} {loaner.model} {loaner.color ? `- ${loaner.color}` : ''}
+                                    </option>
+                                ))
+                            )}
+                        </select>
+                    </label>
+                    <label className="block text-xs font-bold uppercase tracking-[0.2em] text-zinc-500 sm:col-span-2">
+                        Notes
+                        <textarea value={notes} onChange={(e) => setNotes(e.target.value)} className="mt-2 min-h-28 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm normal-case tracking-normal text-white outline-none focus:border-red-500" />
+                    </label>
+                </div>
+
+                <button type="submit" disabled={submitting} className="mt-5 rounded-2xl border border-red-500/40 bg-red-600/15 px-5 py-3 text-sm font-black uppercase tracking-[0.22em] text-red-100 transition hover:border-red-400 hover:bg-red-600/25 disabled:opacity-50">
+                    Submit Request
+                </button>
+            </form>
+        </div>
     );
 }
 

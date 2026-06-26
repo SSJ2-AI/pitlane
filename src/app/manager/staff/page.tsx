@@ -134,6 +134,7 @@ export default function ManagerStaffPage() {
                     <nav className="flex flex-wrap items-center gap-3">
                         <VoiceStatusDot />
                         <Link href="/dashboard" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Dashboard</Link>
+                        <Link href="/manager/calendar" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Calendar</Link>
                         <Link href="/manager/departments" className="rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition hover:border-red-500 hover:text-white">Departments</Link>
                         <span className="inline-flex items-center rounded-full border border-red-500/40 bg-red-600/15 px-4 py-2 text-sm font-semibold text-red-200">Staff</span>
                     </nav>
