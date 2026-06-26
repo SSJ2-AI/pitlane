@@ -126,10 +126,17 @@ type VoiceContextValue = {
 const VoiceContext = createContext<VoiceContextValue | undefined>(undefined);
 
 const defaultVoiceServiceUrl = 'https://pitlane-voice-production.up.railway.app';
+// Accept either NEXT_PUBLIC_VOICE_SERVICE_URL (historical) or
+// NEXT_PUBLIC_VOICE_URL (Phase 12 shortened env name) so existing
+// deploys don't break. If neither is set we fall back to the
+// production Railway URL so the dashboard still works against the
+// shared voice service in the demo / preview environment.
 const voiceServiceUrl =
-    process.env.NEXT_PUBLIC_VOICE_SERVICE_URL && process.env.NEXT_PUBLIC_VOICE_SERVICE_URL.length > 0
+    (process.env.NEXT_PUBLIC_VOICE_SERVICE_URL && process.env.NEXT_PUBLIC_VOICE_SERVICE_URL.length > 0
         ? process.env.NEXT_PUBLIC_VOICE_SERVICE_URL
-        : defaultVoiceServiceUrl;
+        : process.env.NEXT_PUBLIC_VOICE_URL && process.env.NEXT_PUBLIC_VOICE_URL.length > 0
+            ? process.env.NEXT_PUBLIC_VOICE_URL
+            : defaultVoiceServiceUrl);
 
 function toWebSocketUrl(serviceUrl: string) {
     const url = new URL('/ws', serviceUrl);
