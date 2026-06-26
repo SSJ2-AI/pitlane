@@ -51,10 +51,10 @@ API Key:  sk_9b5b0a51eb1ca11e60edccf664d9ad7855f1bac5cd48f687 (PitLane Voice key
 ```
 
 Agent is configured with:
-- System prompt: Porsche Toronto service advisor AI
-- 3 server tools: `customer_lookup`, `book_appointment`, `check_repair_order_status`
+- System prompt: see [`src/aria-prompt.ts`](src/aria-prompt.ts) — version-controlled source of truth. The live prompt running on the ElevenLabs dashboard MUST be kept in sync with this file. The prompt explicitly distinguishes `request_callback` (log + stay on call) from `transfer_call` (live Twilio handoff + drop off) so Aria doesn't hang up on callers who just asked for a follow-up call.
+- Tools: `customer_lookup`, `book_appointment`, `check_repair_order_status`, `request_callback`, `transfer_call`, `log_upsell`, `request_loaner`, `send_sms`, `update_customer_name`, `repair_eta`, `warranty`
 - ElevenLabs Turbo v2 voice (Aria — calm, professional)
-- Post-call webhook: `{RAILWAY_URL}/events/call-completed`
+- Post-call webhook: `{RAILWAY_URL}/webhook/post-call` (legacy alias: `/events/call-completed`)
 
 > After deploying to Railway, update the tool webhook URLs in the ElevenLabs dashboard to your actual Railway domain.
 
