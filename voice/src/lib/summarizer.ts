@@ -34,7 +34,7 @@ export interface CallSummary {
   sentiment: CallSentiment
   loaner_needed: boolean
   summary_text: string
-  generated_by: 'openai' | 'heuristic'
+  generated_by: 'openai' | 'heuristic' | 'elevenlabs'
 }
 
 export interface TranscriptTurn {

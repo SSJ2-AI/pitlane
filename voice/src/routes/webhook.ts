@@ -10,6 +10,7 @@ import {
   bumpCustomerCallStats,
   findActiveAssignmentForPhone,
   findCustomerByPhone,
+  insertCustomerByPhoneIfMissing,
   isSupabaseConfigured,
   upsertCallLog,
   upsertCustomerByPhone,
@@ -422,7 +423,14 @@ interface PostCallDataShape {
       internal_number?: string
     }
   }
+  conversation_initiation_client_data?: {
+    dynamic_variables?: {
+      caller_id?: string
+      caller_phone?: string
+    }
+  }
   transcript?: PostCallTranscriptTurn[]
+  analysis?: Record<string, unknown>
   status?: string
   summary?: string
 }
@@ -447,6 +455,31 @@ function normaliseTranscript(input: PostCallTranscriptTurn[] | undefined): Trans
     .filter((turn) => turn.message.length > 0)
 }
 
+function firstNonBlank(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return null
+}
+
+function firstFiniteNumber(...values: unknown[]): number {
+  for (const value of values) {
+    const parsed = typeof value === 'number'
+      ? value
+      : typeof value === 'string'
+      ? Number(value)
+      : NaN
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return 0
+}
+
+function normaliseAnalysis(input: unknown): Record<string, unknown> | null {
+  return input && typeof input === 'object' && !Array.isArray(input)
+    ? input as Record<string, unknown>
+    : null
+}
+
 router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Response> => {
   // Phase 8b spec: even if the HMAC check fails we LOG it loudly and still
   // process the payload so call data isn't silently dropped. Production
@@ -464,36 +497,26 @@ router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Re
   const envelope: PostCallDataShape =
     (body.data && typeof body.data === 'object') ? body.data : body
 
-  const conversationId =
-    envelope.conversation_id
-    ?? envelope.call_id
-    ?? body.conversation_id
-    ?? body.call_id
-    ?? null
-  const callSid = envelope.call_sid ?? body.call_sid ?? null
-  const callerPhone = (
-    envelope.caller_phone
-    ?? envelope.metadata?.phone_call?.external_number
-    ?? body.caller_phone
-    ?? body.metadata?.phone_call?.external_number
-    ?? ''
-  ).trim()
-  const duration =
-    envelope.duration_secs
-    ?? envelope.duration_seconds
-    ?? envelope.call_duration_secs
-    ?? body.duration_secs
-    ?? body.duration_seconds
-    ?? body.call_duration_secs
-    ?? 0
-  const status = normaliseStatus(envelope.status ?? body.status)
-  const transcript = normaliseTranscript(envelope.transcript ?? body.transcript)
+  const conversationId = firstNonBlank(envelope.conversation_id, envelope.call_id)
+  const callSid = firstNonBlank(envelope.call_sid)
+  const callerPhone = firstNonBlank(
+    envelope.metadata?.phone_call?.external_number,
+    envelope.conversation_initiation_client_data?.dynamic_variables?.caller_id,
+    envelope.conversation_initiation_client_data?.dynamic_variables?.caller_phone,
+    envelope.caller_phone,
+  ) ?? ''
+  const duration = firstFiniteNumber(
+    envelope.call_duration_secs,
+    envelope.duration_secs,
+    envelope.duration_seconds,
+  )
+  const status = normaliseStatus(envelope.status)
+  const transcript = normaliseTranscript(envelope.transcript)
+  const analysis = normaliseAnalysis(envelope.analysis)
   const calledNumber =
     envelope.called_number
     ?? envelope.metadata?.phone_call?.to_number
     ?? envelope.metadata?.phone_call?.internal_number
-    ?? body.called_number
-    ?? body.metadata?.phone_call?.to_number
     ?? null
 
   // Per Phase 8b spec — single debug log line capturing the parsed fields
@@ -512,13 +535,16 @@ router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Re
   // so brand-new callers show up on the /customers page even before they're
   // matched to a CDK record. No-op when Supabase isn't configured.
   if (callerPhone && isSupabaseConfigured()) {
-    void upsertCustomerByPhone({
-      phone: callerPhone,
-      dealer_id: dealer.id,
-      is_new_customer: true,
-    })
-      .then(() => bumpCustomerCallStats(callerPhone, { dealerId: dealer.id }))
-      .catch(() => undefined)
+    try {
+      await insertCustomerByPhoneIfMissing({
+        phone: callerPhone,
+        dealer_id: dealer.id,
+        is_new_customer: true,
+      })
+      await bumpCustomerCallStats(callerPhone, { dealerId: dealer.id })
+    } catch (err) {
+      console.error('[post-call] customers auto-upsert failed:', err instanceof Error ? err.message : err)
+    }
   }
 
   const result = await processPostCall({
@@ -527,6 +553,7 @@ router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Re
     callerPhone,
     durationSeconds: duration,
     transcript,
+    analysis,
     status,
     dealer,
   })

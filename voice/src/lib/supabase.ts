@@ -632,6 +632,57 @@ export async function upsertCustomerByPhone(input: {
 }
 
 /**
+ * Insert a customer index row for a caller when one does not already exist.
+ * This intentionally uses ON CONFLICT DO NOTHING semantics for post-call
+ * webhook ingestion: completed calls should anchor new callers, but must not
+ * overwrite metadata collected by pre-call/tools on an existing row.
+ */
+export async function insertCustomerByPhoneIfMissing(input: {
+  phone: string
+  dealer_id?: string | null
+  is_new_customer?: boolean
+  aria_notes?: string | null
+}): Promise<CustomerRow | null> {
+  const client = getSupabase()
+  if (!client) return null
+  const normalised = normaliseCallerPhone(input.phone)
+  if (!normalised) return null
+
+  try {
+    const { data, error } = await client
+      .from('customers')
+      .upsert(
+        {
+          phone: normalised,
+          dealer_id: input.dealer_id ?? null,
+          is_new_customer: input.is_new_customer ?? true,
+          aria_notes: input.aria_notes ?? null,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'dealer_id,phone', ignoreDuplicates: true },
+      )
+      .select('*')
+      .maybeSingle()
+    if (error) {
+      const code = (error as { code?: string }).code
+      if (code === '42P01' || /relation "customers" does not exist/i.test(error.message ?? '')) {
+        console.warn('[Supabase] customers table missing — apply migrations 0006 + 0012')
+        return null
+      }
+      if (code === '42703' || /column "aria_notes" of relation "customers" does not exist/i.test(error.message ?? '')) {
+        console.warn('[Supabase] customers.aria_notes missing — apply migration 0012')
+        return null
+      }
+      throw error
+    }
+    return (data as CustomerRow | null) ?? null
+  } catch (err) {
+    console.error('[Supabase] insertCustomerByPhoneIfMissing failed:', err instanceof Error ? err.message : err)
+    return null
+  }
+}
+
+/**
  * Aria collected the caller's name. PIPEDA compliance (migration 0012)
  * means we DO NOT persist the name locally — CDK is the customer-name
  * source of truth.
