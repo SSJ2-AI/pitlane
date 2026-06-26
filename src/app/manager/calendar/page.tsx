@@ -570,7 +570,6 @@ function LabelledInput({
     label: string;
     onChange?: (value: string) => void;
 } & Omit<InputHTMLAttributes<HTMLInputElement>, 'onChange'>) {
-} & Omit<InputHTMLAttributes<HTMLInputElement>, 'onChange'>) {
     const id = useMemo(() => props.name ?? label.toLowerCase().replace(/\s+/g, '-'), [label, props.name]);
     return (
         <label htmlFor={id} className="block text-xs font-bold uppercase tracking-[0.2em] text-zinc-500">
