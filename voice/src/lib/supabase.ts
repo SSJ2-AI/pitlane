@@ -568,6 +568,52 @@ export async function findCustomerByPhone(
 }
 
 /**
+ * Ensure a caller phone exists in public.customers without mutating any
+ * existing row values.
+ *
+ * SQL equivalent:
+ *   INSERT ... ON CONFLICT (dealer_id, phone) DO NOTHING
+ */
+export async function insertCustomerByPhoneIfMissing(input: {
+  phone: string
+  dealer_id?: string | null
+  is_new_customer?: boolean
+}): Promise<void> {
+  const client = getSupabase()
+  if (!client) return
+  const normalised = normaliseCallerPhone(input.phone)
+  if (!normalised) return
+
+  try {
+    const { error } = await client
+      .from('customers')
+      .upsert(
+        {
+          phone: normalised,
+          dealer_id: input.dealer_id ?? null,
+          is_new_customer: input.is_new_customer ?? true,
+        },
+        {
+          onConflict: 'dealer_id,phone',
+          ignoreDuplicates: true,
+        },
+      )
+      .select('id')
+      .limit(1)
+    if (error) {
+      const code = (error as { code?: string }).code
+      if (code === '42P01' || /relation "customers" does not exist/i.test(error.message ?? '')) {
+        console.warn('[Supabase] customers table missing — apply migrations 0006 + 0012')
+        return
+      }
+      throw error
+    }
+  } catch (err) {
+    console.error('[Supabase] insertCustomerByPhoneIfMissing failed:', err instanceof Error ? err.message : err)
+  }
+}
+
+/**
  * Insert a fresh customer row keyed by phone + dealer. Returns the inserted
  * row or null on failure. ON CONFLICT (dealer_id, phone) DO UPDATE keeps the
  * existing row but bumps updated_at so the upsert is safe to call from

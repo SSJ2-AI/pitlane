@@ -32,6 +32,8 @@ export interface ProcessPostCallInput {
   transcript: TranscriptTurn[]
   status: PostCallStatus
   startedAt?: string
+  /** Raw ElevenLabs analysis payload from the post-call webhook (if present). */
+  analysis?: Record<string, unknown> | null
   /** Multi-tenancy: dealer that owns this call. Defaults to DEFAULT_DEALER. */
   dealer?: Dealer | null
 }
@@ -56,6 +58,48 @@ export function transcriptToText(transcript: TranscriptTurn[]): string {
   return transcript.map((t) => `[${t.role}] ${t.message}`).join('\n')
 }
 
+function pickString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
+}
+
+function normaliseAnalysisSentiment(value: unknown): CallSummary['sentiment'] | null {
+  if (typeof value !== 'string') return null
+  const s = value.trim().toLowerCase()
+  if (s.includes('positive')) return 'positive'
+  if (s.includes('negative') || s.includes('frustrated')) return 'negative'
+  if (s.includes('neutral')) return 'neutral'
+  return null
+}
+
+function mergeSummaryWithElevenLabsAnalysis(
+  summary: CallSummary,
+  transcript: TranscriptTurn[],
+  analysis: Record<string, unknown> | null | undefined,
+): CallSummary {
+  if (!analysis || typeof analysis !== 'object') return summary
+
+  const analysisSummaryText =
+    pickString(analysis.summary)
+    ?? pickString(analysis.summary_text)
+    ?? pickString(analysis.call_summary)
+    ?? pickString(analysis.conversation_summary)
+  const analysisSentiment = normaliseAnalysisSentiment(analysis.sentiment)
+  const analysisTopics = Array.isArray(analysis.topics)
+    ? analysis.topics.filter((t): t is string => typeof t === 'string' && t.trim().length > 0).slice(0, 8)
+    : []
+
+  return {
+    ...summary,
+    summary_text:
+      (summary.summary_text || '').trim().length > 0
+      || (!analysisSummaryText && transcript.length > 0)
+        ? summary.summary_text
+        : (analysisSummaryText ?? summary.summary_text),
+    sentiment: summary.sentiment === 'neutral' && analysisSentiment ? analysisSentiment : summary.sentiment,
+    topics: summary.topics.length > 0 ? summary.topics : analysisTopics,
+  }
+}
+
 export async function processPostCall(input: ProcessPostCallInput): Promise<ProcessPostCallResult> {
   const phone = (input.callerPhone ?? '').trim()
   const dealer = input.dealer ?? DEFAULT_DEALER
@@ -76,6 +120,13 @@ export async function processPostCall(input: ProcessPostCallInput): Promise<Proc
     summariseTranscript(input.transcript),
     scoreSentiment(input.transcript),
   ])
+  const mergedSummary = mergeSummaryWithElevenLabsAnalysis(summary, input.transcript, input.analysis)
+  const summaryForStorage: Record<string, unknown> = {
+    ...(mergedSummary as unknown as Record<string, unknown>),
+  }
+  if (input.analysis && typeof input.analysis === 'object') {
+    summaryForStorage.elevenlabs_analysis = input.analysis
+  }
 
   const callLogId = await upsertCallLog({
     call_sid: input.callSid ?? null,
@@ -86,7 +137,7 @@ export async function processPostCall(input: ProcessPostCallInput): Promise<Proc
     direction: 'inbound',
     duration_secs: input.durationSeconds,
     transcript: input.transcript as unknown as unknown[],
-    summary: summary as unknown as Record<string, unknown>,
+    summary: summaryForStorage,
     status: input.status,
     started_at: input.startedAt,
     ended_at: new Date().toISOString(),
@@ -100,13 +151,13 @@ export async function processPostCall(input: ProcessPostCallInput): Promise<Proc
   }
 
   let loanerRequestId: string | null = null
-  if (summary.loaner_needed && customer?.id) {
+  if (mergedSummary.loaner_needed && customer?.id) {
     loanerRequestId = await insertLoanerRequest({
       call_log_id: callLogId,
       customer_id: customer.id,
       dealer_id: dealer.id,
       requested_date: customer.upcomingAppointments[0]?.date ?? null,
-      notes: summary.summary_text || null,
+      notes: mergedSummary.summary_text || null,
     })
   }
 
@@ -123,14 +174,14 @@ export async function processPostCall(input: ProcessPostCallInput): Promise<Proc
       callId: inMemoryCallId,
       status: input.status,
       durationSeconds: input.durationSeconds,
-      summary: summary.summary_text,
+      summary: mergedSummary.summary_text,
       transcript: transcriptText || undefined,
     })
     broadcastScreenPop({
       type: 'CALL_ENDED',
       callId: inMemoryCallId,
       duration: input.durationSeconds,
-      summary: summary.summary_text,
+      summary: mergedSummary.summary_text,
       transcript: transcriptText || undefined,
       timestamp: new Date().toISOString(),
     })
@@ -138,7 +189,7 @@ export async function processPostCall(input: ProcessPostCallInput): Promise<Proc
 
   return {
     customer,
-    summary,
+    summary: mergedSummary,
     sentiment: sentimentScore,
     callLogId,
     loanerRequestId,

@@ -10,6 +10,7 @@ import {
   bumpCustomerCallStats,
   findActiveAssignmentForPhone,
   findCustomerByPhone,
+  insertCustomerByPhoneIfMissing,
   isSupabaseConfigured,
   upsertCallLog,
   upsertCustomerByPhone,
@@ -422,9 +423,15 @@ interface PostCallDataShape {
       internal_number?: string
     }
   }
+  conversation_initiation_client_data?: {
+    dynamic_variables?: {
+      caller_id?: string
+    }
+  }
   transcript?: PostCallTranscriptTurn[]
   status?: string
   summary?: string
+  analysis?: Record<string, unknown> | null
 }
 
 interface PostCallRequestBody extends PostCallDataShape {
@@ -458,11 +465,10 @@ router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Re
 
   const body = (req.body ?? {}) as PostCallRequestBody
 
-  // ElevenLabs' production post-call webhook wraps the payload one level
-  // deep under `data`. Older configs / test fixtures send the fields at the
-  // top level. Read from `data` when present, top-level body otherwise.
-  const envelope: PostCallDataShape =
-    (body.data && typeof body.data === 'object') ? body.data : body
+  // ElevenLabs production payload shape: ALL call data is under body.data.
+  // Keep flat-body fallback for legacy fixtures.
+  const data = (body.data && typeof body.data === 'object') ? body.data : null
+  const envelope: PostCallDataShape = data ?? body
 
   const conversationId =
     envelope.conversation_id
@@ -474,8 +480,10 @@ router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Re
   const callerPhone = (
     envelope.caller_phone
     ?? envelope.metadata?.phone_call?.external_number
+    ?? envelope.conversation_initiation_client_data?.dynamic_variables?.caller_id
     ?? body.caller_phone
     ?? body.metadata?.phone_call?.external_number
+    ?? body.conversation_initiation_client_data?.dynamic_variables?.caller_id
     ?? ''
   ).trim()
   const duration =
@@ -488,6 +496,12 @@ router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Re
     ?? 0
   const status = normaliseStatus(envelope.status ?? body.status)
   const transcript = normaliseTranscript(envelope.transcript ?? body.transcript)
+  const analysis =
+    envelope.analysis && typeof envelope.analysis === 'object'
+      ? envelope.analysis
+      : body.analysis && typeof body.analysis === 'object'
+      ? body.analysis
+      : null
   const calledNumber =
     envelope.called_number
     ?? envelope.metadata?.phone_call?.to_number
@@ -498,7 +512,13 @@ router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Re
 
   // Per Phase 8b spec — single debug log line capturing the parsed fields
   // so a Railway tail can immediately confirm the unwrap worked.
-  console.log('[post-call] received', { caller_phone: callerPhone, duration })
+  console.log('[post-call] received', {
+    caller_phone: callerPhone,
+    conversation_id: conversationId,
+    duration,
+    transcript_turns: transcript.length,
+    has_analysis: Boolean(analysis),
+  })
 
   const dealer = await getDealerByPhone(calledNumber)
 
@@ -512,7 +532,7 @@ router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Re
   // so brand-new callers show up on the /customers page even before they're
   // matched to a CDK record. No-op when Supabase isn't configured.
   if (callerPhone && isSupabaseConfigured()) {
-    void upsertCustomerByPhone({
+    void insertCustomerByPhoneIfMissing({
       phone: callerPhone,
       dealer_id: dealer.id,
       is_new_customer: true,
@@ -527,6 +547,7 @@ router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Re
     callerPhone,
     durationSeconds: duration,
     transcript,
+    analysis,
     status,
     dealer,
   })

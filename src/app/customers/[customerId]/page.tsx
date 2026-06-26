@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
+import { CustomerUpsellsPanel } from '@/components/CustomerUpsellsPanel';
 import type { CustomerDetailPayload } from '@/app/api/customers/[id]/route';
 
 const TIER_STYLES: Record<string, string> = {
@@ -252,6 +253,8 @@ function VehiclesPanel({ data }: { data: CustomerDetailPayload }) {
 function SidebarPanel({ data }: { data: CustomerDetailPayload }) {
     return (
         <aside className="space-y-6">
+            <CustomerUpsellsPanel customerId={data.customer.id} />
+
             <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-6">
                 <p className="text-sm font-semibold uppercase tracking-[0.32em] text-zinc-500">Recent calls</p>
                 <h3 className="mt-2 text-xl font-black text-white">Aria conversations</h3>

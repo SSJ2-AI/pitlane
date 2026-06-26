@@ -469,7 +469,7 @@ interface RequestCallbackInput {
 }
 
 const REQUEST_CALLBACK_CONFIRMATION =
-  "I've let your service advisor know you'd like a call back. They'll reach you shortly."
+  "I've logged a callback request for your service advisor. They'll reach out within one business day. Is there anything else I can help you with?"
 
 async function handleRequestCallback(input: RequestCallbackInput, res: Response): Promise<Response> {
   const phone = (input.caller_phone ?? '').trim()
