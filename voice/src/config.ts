@@ -33,3 +33,10 @@ export function assertConfig() {
     throw new Error('ELEVENLABS_API_KEY is required')
   }
 }
+
+// Re-export the canonical Aria system prompt. The prompt itself lives in
+// ./aria-prompt.ts; we re-export from config so callers (smoke scripts,
+// docs, future "push prompt to ElevenLabs" tooling) can `import { ARIA_SYSTEM_PROMPT } from './config'`.
+// The runtime agent still reads the prompt from the ElevenLabs dashboard —
+// see voice/src/aria-prompt.ts for the sync workflow.
+export { ARIA_SYSTEM_PROMPT } from './aria-prompt'
