@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
 import { LoanerRequestModal } from '@/components/LoanerRequestModal';
+import { CustomerUpsellsPanel } from '@/components/CustomerUpsellsPanel';
 import type { CustomerDetailPayload } from '@/app/api/customers/[id]/route';
 
 const TIER_STYLES: Record<string, string> = {
@@ -138,7 +139,10 @@ export default function CustomerDetailPage() {
                         )}
 
                         <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
-                            <VehiclesPanel data={data} />
+                            <div className="space-y-6">
+                                <VehiclesPanel data={data} />
+                                <CustomerUpsellsPanel customerId={data.customer.id} />
+                            </div>
                             <SidebarPanel data={data} />
                         </div>
                     </>

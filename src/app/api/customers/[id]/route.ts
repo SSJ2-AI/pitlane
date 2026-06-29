@@ -56,7 +56,11 @@ export async function GET(
         .filter((ro) => ro.status !== 'completed')
         .sort((a, b) => (a.date < b.date ? 1 : -1));
 
-    const { calls: recentCalls, persistence } = await loadRecentCalls(customer.id, dealer.id);
+    const { calls: recentCalls, persistence } = await loadRecentCalls(
+        customer.id,
+        customer.phone,
+        dealer.id,
+    );
 
     return NextResponse.json({
         customer: { ...customer, name: `${customer.firstName} ${customer.lastName}` },
@@ -71,19 +75,30 @@ export async function GET(
 
 async function loadRecentCalls(
     customerId: string,
+    customerPhone: string,
     dealerId: string,
 ): Promise<{ calls: CallLogRow[]; persistence: 'supabase' | 'mock' }> {
     const supabase = getSupabase();
     if (!supabase) return { calls: [], persistence: 'mock' };
+
+    // Fallback by phone so calls land on the right profile even when the
+    // call_logs row hasn't been linked to a customer_id yet (Aria's
+    // post-call webhook can hit before CDK lookup resolves, leaving
+    // customer_id NULL but caller_phone populated). PostgREST `.or()`
+    // accepts a comma-separated list of column.op.value clauses.
+    const safePhone = (customerPhone ?? '').replace(/[,()]/g, '');
+    const orClauses = safePhone
+        ? `customer_id.eq.${customerId},caller_phone.eq.${safePhone}`
+        : `customer_id.eq.${customerId}`;
 
     try {
         const { data, error } = await supabase
             .from('call_logs')
             .select('*')
             .eq('dealer_id', dealerId)
-            .eq('customer_id', customerId)
+            .or(orClauses)
             .order('started_at', { ascending: false })
-            .limit(5);
+            .limit(10);
         if (error) {
             console.error('[/api/customers/:id] recent-calls failed:', error.message);
             return { calls: [], persistence: 'mock' };

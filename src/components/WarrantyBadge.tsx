@@ -45,6 +45,7 @@ export function WarrantyBadge({ vehicleId }: { vehicleId?: string }) {
     const [data, setData] = useState<WarrantyResponse | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [retryToken, setRetryToken] = useState(0);
 
     useEffect(() => {
         if (!vehicleId || !voiceServiceUrl) {
@@ -65,7 +66,12 @@ export function WarrantyBadge({ vehicleId }: { vehicleId?: string }) {
             })
             .catch((err) => {
                 if (cancelled) return;
-                setError(err instanceof Error ? err.message : 'Failed to load warranty');
+                // Fix 8: log raw error for ops; surface a friendly message
+                // + Retry button to the advisor. Returning here doesn't
+                // throw upward so the rest of the customer profile stays
+                // intact when the voice service is down.
+                console.warn('[WarrantyBadge] voice service request failed:', err);
+                setError(err instanceof Error ? err.message : 'unknown');
             })
             .finally(() => {
                 if (!cancelled) setLoading(false);
@@ -73,7 +79,7 @@ export function WarrantyBadge({ vehicleId }: { vehicleId?: string }) {
         return () => {
             cancelled = true;
         };
-    }, [vehicleId, voiceServiceUrl]);
+    }, [vehicleId, voiceServiceUrl, retryToken]);
 
     if (!vehicleId) return null;
 
@@ -86,13 +92,30 @@ export function WarrantyBadge({ vehicleId }: { vehicleId?: string }) {
         );
     }
 
-    if (error || !data) {
+    if (error && !data) {
         return (
             <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-6">
                 <p className="text-sm font-semibold uppercase tracking-[0.32em] text-zinc-500">Warranty</p>
-                <p className="mt-4 text-sm text-zinc-400">
-                    {error ? `Voice service unavailable (${error})` : 'No warranty data on file.'}
-                </p>
+                <div className="mt-4 rounded-2xl border border-amber-500/40 bg-amber-500/10 px-4 py-4 text-sm text-amber-100">
+                    <p className="font-bold">Voice service temporarily unavailable — retry in a moment.</p>
+                    <p className="mt-1 text-[10px] uppercase tracking-[0.22em] text-amber-200/80">{error}</p>
+                    <button
+                        type="button"
+                        onClick={() => setRetryToken((t) => t + 1)}
+                        className="mt-3 rounded-full border border-amber-300/50 bg-amber-500/20 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.18em] text-amber-100 transition hover:border-amber-200 hover:bg-amber-500/30 hover:text-white"
+                    >
+                        Retry
+                    </button>
+                </div>
+            </section>
+        );
+    }
+
+    if (!data) {
+        return (
+            <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-6">
+                <p className="text-sm font-semibold uppercase tracking-[0.32em] text-zinc-500">Warranty</p>
+                <p className="mt-4 text-sm text-zinc-400">No warranty data on file.</p>
             </section>
         );
     }

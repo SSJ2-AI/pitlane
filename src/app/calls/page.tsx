@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { FormEvent, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import { FormEvent, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
     AppointmentRow,
     CallLogRow,
@@ -75,7 +75,9 @@ function formatTime(iso: string | null) {
 }
 
 function formatDurationSecs(seconds: number | null) {
-    if (seconds === null || seconds === undefined) return '—';
+    if (seconds === null || seconds === undefined || seconds === 0) {
+        return 'Duration unavailable';
+    }
     return `${seconds}s`;
 }
 
@@ -86,11 +88,26 @@ function formatCurrency(value: number | null) {
 
 // Spec (Phase 9 task 1): show the customer's full name when MOCK_CUSTOMERS
 // resolves it; otherwise fall back to the phone number — NOT the raw
-// `cust_001` internal id.
+// `cust_001` internal id. Fix 4: treat literal 'unknown' the same as a
+// missing phone so we render the friendlier "Caller unknown" string.
 function callerLabel(call: CallRowWithName) {
     if (call.customer_name) return call.customer_name;
-    if (call.caller_phone) return call.caller_phone;
-    return 'Unknown caller';
+    const phone = (call.caller_phone ?? '').trim();
+    if (phone && phone.toLowerCase() !== 'unknown') return phone;
+    return 'Caller unknown';
+}
+
+// Fix 4: a call_logs row is "data pending" when the post-call webhook
+// hasn't filled in the basics yet — no resolved phone, no conversation
+// id from ElevenLabs, or no duration. These rows are NOT hidden; they
+// render with a yellow "⚠ Data pending" badge so advisors can see them
+// and know to wait a few seconds for the webhook to land.
+function isDataPending(call: CallRowWithName): boolean {
+    const phone = (call.caller_phone ?? '').trim().toLowerCase();
+    const noPhone = !phone || phone === 'unknown';
+    const noConvId = !call.conversation_id;
+    const noDuration = !call.duration_secs;
+    return noPhone || noConvId || noDuration;
 }
 
 export default function CallsPage() {
@@ -134,6 +151,35 @@ function CallsPageInner() {
     const [selectedId, setSelectedId] = useState<string | null>(null);
     const [detail, setDetail] = useState<CallDetailResponse | null>(null);
     const [detailLoading, setDetailLoading] = useState(false);
+
+    // Fix 6: ref + side-effects to make the detail panel closable.
+    // - Escape key closes the panel from anywhere on the page.
+    // - Click outside both the panel and the row list closes the panel.
+    // - Same-row re-click toggles it closed (handled inline on the row).
+    const detailRef = useRef<HTMLElement | null>(null);
+    const listRef = useRef<HTMLUListElement | null>(null);
+
+    const closeDetail = useCallback(() => setSelectedId(null), []);
+
+    useEffect(() => {
+        if (!selectedId) return;
+        function onKeyDown(e: KeyboardEvent) {
+            if (e.key === 'Escape') closeDetail();
+        }
+        function onPointerDown(e: PointerEvent) {
+            const target = e.target as Node | null;
+            if (!target) return;
+            const inDetail = detailRef.current?.contains(target);
+            const inList = listRef.current?.contains(target);
+            if (!inDetail && !inList) closeDetail();
+        }
+        document.addEventListener('keydown', onKeyDown);
+        document.addEventListener('pointerdown', onPointerDown);
+        return () => {
+            document.removeEventListener('keydown', onKeyDown);
+            document.removeEventListener('pointerdown', onPointerDown);
+        };
+    }, [selectedId, closeDetail]);
 
     const buildQuery = useCallback(() => {
         const params = new URLSearchParams();
@@ -382,7 +428,7 @@ function CallsPageInner() {
                 )}
 
                 <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_420px]">
-                    <ul className="space-y-3">
+                    <ul ref={listRef} className="space-y-3">
                         {loading && visibleCalls.length === 0 && (
                             <li className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-900 px-5 py-8 text-center text-sm text-zinc-400">Loading…</li>
                         )}
@@ -395,16 +441,21 @@ function CallsPageInner() {
                             const outcome = call.summary?.outcome;
                             const sentiment = call.summary?.sentiment;
                             const isActive = selectedId === call.id;
+                            const dataPending = isDataPending(call);
+                            const phoneDisplay = (call.caller_phone ?? '').trim();
+                            const phoneIsPlaceholder = !phoneDisplay || phoneDisplay.toLowerCase() === 'unknown';
                             return (
                                 <li key={call.id}>
                                     <div
                                         role="button"
                                         tabIndex={0}
-                                        onClick={() => setSelectedId(call.id)}
+                                        // Fix 6: clicking an already-selected row toggles
+                                        // the detail panel closed.
+                                        onClick={() => setSelectedId((prev) => (prev === call.id ? null : call.id))}
                                         onKeyDown={(e) => {
                                             if (e.key === 'Enter' || e.key === ' ') {
                                                 e.preventDefault();
-                                                setSelectedId(call.id);
+                                                setSelectedId((prev) => (prev === call.id ? null : call.id));
                                             }
                                         }}
                                         className={`w-full rounded-3xl border p-5 text-left transition cursor-pointer ${
@@ -426,9 +477,19 @@ function CallsPageInner() {
                                                 ) : (
                                                     <p className="text-base font-black text-white">{callerLabel(call)}</p>
                                                 )}
-                                                <p className="mt-0.5 text-xs text-zinc-500">{call.caller_phone}</p>
+                                                <p className="mt-0.5 text-xs text-zinc-500">
+                                                    {phoneIsPlaceholder ? 'Phone unavailable' : phoneDisplay}
+                                                </p>
                                             </div>
                                             <div className="flex flex-wrap items-center gap-2">
+                                                {dataPending && (
+                                                    <span
+                                                        title="Post-call webhook hasn't filled in the basics yet (phone, conversation id, or duration). Refresh in a moment."
+                                                        className="rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] border-amber-500/40 bg-amber-500/10 text-amber-200"
+                                                    >
+                                                        ⚠ Data pending
+                                                    </span>
+                                                )}
                                                 {outcome && (
                                                     <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] ${OUTCOME_STYLES[outcome]}`}>
                                                         {outcome.replace(/_/g, ' ')}
@@ -472,9 +533,20 @@ function CallsPageInner() {
                             </section>
                         )}
                         {selectedId && detailLoading && (
-                            <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-6 text-sm text-zinc-400">Loading call detail…</section>
+                            <section
+                                ref={(node) => { detailRef.current = node; }}
+                                className="rounded-3xl border border-zinc-800 bg-zinc-900 p-6 text-sm text-zinc-400"
+                            >
+                                Loading call detail…
+                            </section>
                         )}
-                        {selectedId && !detailLoading && detail && <CallDetailPanel detail={detail} />}
+                        {selectedId && !detailLoading && detail && (
+                            <CallDetailPanel
+                                detail={detail}
+                                onClose={closeDetail}
+                                containerRef={detailRef}
+                            />
+                        )}
                     </aside>
                 </div>
             </section>
@@ -482,26 +554,48 @@ function CallsPageInner() {
     );
 }
 
-function CallDetailPanel({ detail }: { detail: CallDetailResponse }) {
+function CallDetailPanel({
+    detail,
+    onClose,
+    containerRef,
+}: {
+    detail: CallDetailResponse;
+    onClose: () => void;
+    containerRef: React.MutableRefObject<HTMLElement | null>;
+}) {
     const { call, appointments, upsells, loaner_requests } = detail;
     const callWithName = call as CallRowWithName;
     const summary = call.summary;
     const transcript = call.transcript ?? [];
-    const callerHeader = callWithName.customer_name ?? call.customer_id ?? call.caller_phone ?? 'Unknown caller';
+    const callerHeader = callerLabel(callWithName);
 
     return (
-        <div className="space-y-4">
-            <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-5">
+        <div
+            // Wrap in a section so the parent's click-away handler can match
+            // any descendant. The ref points at this wrapper.
+            ref={(node) => { containerRef.current = node; }}
+            className="space-y-4"
+        >
+            <section className="relative rounded-3xl border border-zinc-800 bg-zinc-900 p-5">
+                {/* Fix 6: explicit close button */}
+                <button
+                    type="button"
+                    onClick={onClose}
+                    aria-label="Close call detail"
+                    className="absolute right-3 top-3 flex h-8 w-8 items-center justify-center rounded-full border border-zinc-800 bg-zinc-950 text-sm font-bold text-zinc-400 transition hover:border-red-500 hover:text-white"
+                >
+                    ✕
+                </button>
                 <p className="text-xs font-semibold uppercase tracking-[0.28em] text-zinc-500">Call detail</p>
                 {call.customer_id ? (
                     <Link
                         href={`/customers/${encodeURIComponent(call.customer_id)}`}
-                        className="mt-2 inline-block text-xl font-black text-white transition hover:text-red-200"
+                        className="mt-2 inline-block pr-10 text-xl font-black text-white transition hover:text-red-200"
                     >
                         {callerHeader}
                     </Link>
                 ) : (
-                    <h3 className="mt-2 text-xl font-black text-white">{callerHeader}</h3>
+                    <h3 className="mt-2 pr-10 text-xl font-black text-white">{callerHeader}</h3>
                 )}
                 <div className="mt-3 flex flex-wrap gap-2 text-xs text-zinc-400">
                     <span>{formatTime(call.started_at)}</span>

@@ -71,7 +71,13 @@ export function CallHistory({ customerId, title }: { customerId?: string; title?
             setCalls(payload.calls ?? []);
             setError(null);
         } catch (err) {
-            setError(err instanceof Error ? err.message : 'Failed to load call history');
+            // Fix 8: log the underlying error for ops but show a calm
+            // human-friendly message to the advisor instead of raw
+            // "Failed to fetch". The rest of the customer profile keeps
+            // rendering because this component traps its own errors and
+            // never throws upward.
+            console.warn('[CallHistory] voice service request failed:', err);
+            setError(err instanceof Error ? err.message : 'unknown');
         } finally {
             setLoading(false);
         }
@@ -115,10 +121,27 @@ export function CallHistory({ customerId, title }: { customerId?: string; title?
             {loading && filtered.length === 0 && (
                 <p className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-950 px-4 py-6 text-center text-sm text-zinc-400">Loading call history…</p>
             )}
-            {!loading && filtered.length === 0 && (
+            {!loading && filtered.length === 0 && !error && (
                 <p className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-950 px-4 py-6 text-center text-sm text-zinc-400">
-                    {error ? `Voice service unavailable (${error})` : 'No calls yet. When Aria takes a call it will appear here.'}
+                    No calls yet. When Aria takes a call it will appear here.
                 </p>
+            )}
+            {!loading && error && (
+                <div className="rounded-2xl border border-amber-500/40 bg-amber-500/10 px-4 py-4 text-center text-sm text-amber-100">
+                    <p className="font-bold">Voice service temporarily unavailable — retry in a moment.</p>
+                    <p className="mt-1 text-[10px] uppercase tracking-[0.22em] text-amber-200/80">{error}</p>
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setError(null);
+                            setLoading(true);
+                            void load();
+                        }}
+                        className="mt-3 rounded-full border border-amber-300/50 bg-amber-500/20 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.18em] text-amber-100 transition hover:border-amber-200 hover:bg-amber-500/30 hover:text-white"
+                    >
+                        Retry
+                    </button>
+                </div>
             )}
 
             <ul className="space-y-3">
