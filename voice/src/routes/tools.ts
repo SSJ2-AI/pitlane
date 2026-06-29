@@ -7,9 +7,14 @@ import { config } from '../config'
 import { randomUUID } from 'crypto'
 import { recordEvent, startInboundCall } from '../store/callStore'
 import {
+  countAppointmentsForDate,
+  countAppointmentsForSlot,
+  fetchScheduleOverrides,
+  fetchServiceSchedule,
   findCustomerByPhone,
   findDepartment,
   getOrCreateCallLogIdForConversation,
+  hasLoanerAvailability,
   insertAppointment,
   insertCallbackRequest,
   insertLoanerRequest,
@@ -18,6 +23,8 @@ import {
   queueCdkSync,
   updateCustomerName,
   upsertCustomerByPhone,
+  type ScheduleOverrideRow,
+  type ServiceScheduleRow,
 } from '../lib/supabase'
 import { dispatchSms, type SmsMessageType } from '../lib/sms'
 import { resolveDealerForCall } from '../lib/dealer'
@@ -205,6 +212,8 @@ router.get('/book-appointment', (req: Request, res: Response) => {
       date: (req.query.date as string) ?? (req.query.preferred_date as string),
       time: (req.query.time as string) ?? (req.query.preferred_time as string | undefined),
       callId: req.query.call_id as string | undefined,
+      loanerRequested: req.query.loaner_requested === 'true' || req.query.loaner_requested === '1',
+      loanerEndDate: req.query.loaner_end_date as string | undefined,
     },
     res,
   )
@@ -233,7 +242,12 @@ router.get('/check-ro-status/:customer_id', (req: Request, res: Response) => {
  * Customer record and call store.
  */
 router.post('/book-appointment', (req: Request, res: Response) => {
-  const body = req.body as BookAppointmentRequest & { date?: string; time?: string }
+  const body = req.body as BookAppointmentRequest & {
+    date?: string
+    time?: string
+    loaner_requested?: boolean
+    loaner_end_date?: string
+  }
   void handleBookAppointment(
     {
       customerId: body.customer_id,
@@ -242,6 +256,8 @@ router.post('/book-appointment', (req: Request, res: Response) => {
       date: body.date ?? body.preferred_date,
       time: body.time ?? body.preferred_time,
       callId: body.call_id,
+      loanerRequested: Boolean(body.loaner_requested),
+      loanerEndDate: body.loaner_end_date,
     },
     res,
   )
@@ -748,6 +764,8 @@ interface BookAppointmentInput {
   date: string
   time?: string
   callId?: string
+  loanerRequested?: boolean
+  loanerEndDate?: string
 }
 
 /**
@@ -804,6 +822,55 @@ async function handleBookAppointment(input: BookAppointmentInput, res: Response)
   const vehicle =
     customer.vehicles.find((v: { id: string }) => v.id === vehicleId) ?? customer.vehicles[0]
 
+  // Phase 13 — resolve the dealer FIRST so we can capacity-check the
+  // requested slot against service_schedule before we ever mutate state.
+  const dealerForCheck = await resolveDealerForCall(callId)
+
+  // Capacity gate. When service_schedule is configured for this dealer
+  // we enforce per-slot max_concurrent_bookings. When it isn't (empty
+  // table / pre-migration), we fall through to the existing open
+  // booking flow so legacy callers keep working.
+  let scheduleConfigured = false
+  let perSlotCap = 0
+  try {
+    const schedule = await fetchServiceSchedule(dealerForCheck.id)
+    if (schedule.length > 0) {
+      scheduleConfigured = true
+      const dow = new Date(`${date}T00:00:00`).getDay()
+      const dayRow = schedule.find((s) => s.day_of_week === dow)
+      const override = (await fetchScheduleOverrides(dealerForCheck.id, date, date))[0]
+      if (override?.is_blocked) {
+        return res.json({
+          confirmed: false,
+          reason: 'slot_full',
+          message: 'That date is blocked on our calendar.',
+          alternatives: [],
+        })
+      }
+      perSlotCap = override?.max_concurrent_bookings ?? dayRow?.max_concurrent_bookings ?? 0
+      if (perSlotCap > 0) {
+        const slotCount = await countAppointmentsForSlot(dealerForCheck.id, date, time)
+        if (slotCount >= perSlotCap) {
+          // Offer up to 3 alternative slots in a 7-day window.
+          const alts = await findAvailableSlots({
+            dealerId: dealerForCheck.id,
+            fromDate: date,
+            days: 7,
+            maxSlots: 3,
+          })
+          return res.json({
+            confirmed: false,
+            reason: 'slot_full',
+            message: 'That slot is already full.',
+            alternatives: alts.slots,
+          })
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[Tool] book-appointment capacity check failed (continuing):', err instanceof Error ? err.message : err)
+  }
+
   const confirmationNumber = `APT-${Date.now().toString(36).toUpperCase()}`
   const advisor = pickAdvisor(customer)
   const durationHours = estimateDurationHours(serviceType)
@@ -840,7 +907,7 @@ async function handleBookAppointment(input: BookAppointmentInput, res: Response)
   // 3. Resolve which dealer owns this call (set by the pre-call webhook on
   //    the call_logs row). Defaults to DEFAULT_DEALER when Supabase isn't
   //    configured or the call isn't yet in the store.
-  const dealer = await resolveDealerForCall(callId)
+  const dealer = dealerForCheck
 
   // 4. Persist to Supabase + queue CDK sync (no-ops when not configured).
   let supabaseAppointmentId: string | null = null
@@ -923,6 +990,19 @@ async function handleBookAppointment(input: BookAppointmentInput, res: Response)
     console.error('[Tool] book-appointment: SMS dispatch failed (non-fatal):', err instanceof Error ? err.message : err)
   }
 
+  // Phase 13 — loaner availability flag (advisory). When the caller has
+  // asked for a loaner we surface whether the dealer has a vehicle on
+  // hand for the requested window. Aria uses this to set expectations
+  // ("we have a loaner ready" vs "we'll do our best to arrange one").
+  let loanerAvailable: boolean | undefined
+  if (input.loanerRequested) {
+    loanerAvailable = await hasLoanerAvailability(
+      dealer.id,
+      date,
+      input.loanerEndDate ?? date,
+    )
+  }
+
   return res.json({
     confirmed: true,
     confirmation_number: confirmationNumber,
@@ -934,6 +1014,9 @@ async function handleBookAppointment(input: BookAppointmentInput, res: Response)
       `Your ${serviceType} appointment is confirmed for ${date} at ${time} with ${advisor}. ` +
       `Estimated duration: ${durationHours} hours. Confirmation: ${confirmationNumber}.`,
     sms: smsResultSummary,
+    schedule_enforced: scheduleConfigured,
+    slot_capacity: perSlotCap || null,
+    ...(input.loanerRequested ? { loaner_available: Boolean(loanerAvailable) } : {}),
     persistence: isSupabaseConfigured() ? 'supabase' : 'in-memory',
   })
 }
@@ -1302,5 +1385,168 @@ function buildCustomerSummary(c: typeof MOCK_CUSTOMERS[0]): string {
   }
   return parts.join(' ')
 }
+
+// ─── Phase 13: available-slots search (Aria booking flow) ───────────────────
+//
+// GET /tools/available-slots?dealer_id=<uuid>&date_from=YYYY-MM-DD&days=7
+//
+// Returns the next N concrete bookable slots so Aria can present 3 real
+// times to the caller instead of asking open-ended "what works for you?".
+// Computation:
+//
+//   1. Fetch service_schedule for the dealer.
+//   2. For each day in the window:
+//      a. Apply schedule_overrides (block / custom hours / capacity).
+//      b. Generate slots at slot_duration_mins intervals.
+//      c. Subtract dates already at-or-above max_concurrent_bookings.
+//   3. Cap at 10 slots; return [{ date, time, label }].
+//
+// Failure modes documented in the response:
+//   - schedule unconfigured -> { slots: [], message: 'No schedule configured' }
+//   - any query throw       -> { slots: [], error: 'Schedule unavailable' }
+//
+// Aria's prompt (voice/src/aria-prompt.ts) instructs her to fall back to
+// the legacy open-ended booking flow in either failure case.
+
+interface AvailableSlot {
+  date: string
+  time: string
+  label: string
+}
+
+function pad2(n: number): string {
+  return n.toString().padStart(2, '0')
+}
+
+function isoDate(d: Date): string {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+}
+
+function addDays(d: Date, n: number): Date {
+  const out = new Date(d)
+  out.setDate(out.getDate() + n)
+  return out
+}
+
+function parseTimeHHMM(t: string): { h: number; m: number } | null {
+  const match = /^(\d{1,2}):(\d{2})/.exec(t)
+  if (!match) return null
+  const h = Number(match[1])
+  const m = Number(match[2])
+  if (Number.isNaN(h) || Number.isNaN(m) || h < 0 || h > 23 || m < 0 || m > 59) return null
+  return { h, m }
+}
+
+function buildSlotsForDay(
+  date: Date,
+  open: string,
+  close: string,
+  durationMins: number,
+): AvailableSlot[] {
+  const o = parseTimeHHMM(open)
+  const c = parseTimeHHMM(close)
+  if (!o || !c) return []
+  const dateStr = isoDate(date)
+  const slots: AvailableSlot[] = []
+  let h = o.h
+  let m = o.m
+  while (h * 60 + m + durationMins <= c.h * 60 + c.m) {
+    const time = `${pad2(h)}:${pad2(m)}`
+    const dayLabel = date.toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' })
+    slots.push({ date: dateStr, time, label: `${dayLabel} at ${time}` })
+    m += durationMins
+    while (m >= 60) {
+      m -= 60
+      h += 1
+    }
+    if (h >= 24) break
+  }
+  return slots
+}
+
+interface AvailableSlotsResult {
+  slots: AvailableSlot[]
+  message?: string
+  error?: string
+}
+
+export async function findAvailableSlots(input: {
+  dealerId: string
+  fromDate: string
+  days: number
+  maxSlots?: number
+}): Promise<AvailableSlotsResult> {
+  const maxSlots = input.maxSlots ?? 10
+  try {
+    const schedule = await fetchServiceSchedule(input.dealerId)
+    if (schedule.length === 0) {
+      return { slots: [], message: 'No schedule configured' }
+    }
+    const scheduleByDay = new Map<number, ServiceScheduleRow>()
+    for (const s of schedule) scheduleByDay.set(s.day_of_week, s)
+
+    const start = new Date(`${input.fromDate}T00:00:00`)
+    if (Number.isNaN(start.getTime())) {
+      return { slots: [], error: 'Schedule unavailable' }
+    }
+    const toDateStr = isoDate(addDays(start, Math.max(1, input.days) - 1))
+    const overrides = await fetchScheduleOverrides(input.dealerId, input.fromDate, toDateStr)
+    const overridesByDate = new Map<string, ScheduleOverrideRow>()
+    for (const o of overrides) overridesByDate.set(o.override_date, o)
+
+    const result: AvailableSlot[] = []
+    for (let i = 0; i < input.days && result.length < maxSlots; i += 1) {
+      const day = addDays(start, i)
+      const dateStr = isoDate(day)
+      const dow = day.getDay()
+      const base = scheduleByDay.get(dow)
+      const override = overridesByDate.get(dateStr)
+      if (override?.is_blocked) continue
+      if (!base && !override) continue
+
+      const open = override?.open_time ?? base?.open_time ?? null
+      const close = override?.close_time ?? base?.close_time ?? null
+      const capacity = override?.max_concurrent_bookings ?? base?.max_concurrent_bookings ?? 0
+      const durationMins = base?.slot_duration_mins ?? 60
+      if (!open || !close || capacity <= 0) continue
+
+      const dayCount = await countAppointmentsForDate(input.dealerId, dateStr)
+      if (dayCount >= capacity) continue
+
+      const slots = buildSlotsForDay(day, open, close, durationMins)
+      for (const slot of slots) {
+        if (result.length >= maxSlots) break
+        const slotCount = await countAppointmentsForSlot(input.dealerId, dateStr, slot.time)
+        if (slotCount >= capacity) continue
+        result.push(slot)
+      }
+    }
+    return { slots: result }
+  } catch (err) {
+    console.error('[Tool] available-slots failed:', err instanceof Error ? err.message : err)
+    return { slots: [], error: 'Schedule unavailable' }
+  }
+}
+
+router.get('/available-slots', (req: Request, res: Response): void => {
+  void (async () => {
+    const dealerId = (req.query.dealer_id as string) || ''
+    const fromDate = (req.query.date_from as string) || isoDate(new Date())
+    const days = Math.max(1, Math.min(30, Number(req.query.days ?? 7) || 7))
+    if (!dealerId) {
+      res.status(400).json({ slots: [], error: 'dealer_id is required' })
+      return
+    }
+    const result = await findAvailableSlots({ dealerId, fromDate, days })
+    res.json({
+      dealer_id: dealerId,
+      date_from: fromDate,
+      days,
+      ...result,
+    })
+  })()
+})
+
+export { hasLoanerAvailability }
 
 export default router

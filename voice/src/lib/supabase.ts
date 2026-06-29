@@ -284,6 +284,207 @@ export interface CdkSyncEnqueue {
   payload: Record<string, unknown>
 }
 
+// ─── Phase 13: service schedule + loaner fleet read helpers ─────────────────
+//
+// Aria + the /tools/available-slots endpoint read these to offer concrete
+// booking times and to flag loaner availability. All writes go through the
+// dashboard (src/app/api/manager/*) — the voice service is read-only here.
+
+export interface ServiceScheduleRow {
+  id: string
+  dealer_id: string
+  day_of_week: number
+  open_time: string
+  close_time: string
+  slot_duration_mins: number
+  max_concurrent_bookings: number
+  is_active: boolean
+}
+
+export interface ScheduleOverrideRow {
+  id: string
+  dealer_id: string
+  override_date: string
+  is_blocked: boolean
+  reason: string | null
+  open_time: string | null
+  close_time: string | null
+  max_concurrent_bookings: number | null
+}
+
+export interface LoanerVehicleRow {
+  id: string
+  dealer_id: string
+  make: string
+  model: string
+  year: number
+  /** Quasi-PII; do NOT include in SMS / CDK sync payloads. */
+  license_plate: string
+  color: string | null
+  is_available: boolean
+}
+
+/** Fetch the 7 weekly rows for a dealer. Returns [] when unconfigured
+ *  or the table is missing (caller falls back to open booking). */
+export async function fetchServiceSchedule(dealerId: string): Promise<ServiceScheduleRow[]> {
+  const client = getSupabase()
+  if (!client) return []
+  try {
+    const { data, error } = await client
+      .from('service_schedule')
+      .select('*')
+      .eq('dealer_id', dealerId)
+      .order('day_of_week', { ascending: true })
+    if (error) {
+      const code = (error as { code?: string }).code
+      if (code === '42P01') {
+        console.warn('[Supabase] service_schedule missing — apply migration 0013')
+        return []
+      }
+      throw error
+    }
+    return ((data ?? []) as ServiceScheduleRow[]).filter((r) => r.is_active)
+  } catch (err) {
+    console.error('[Supabase] fetchServiceSchedule failed:', err instanceof Error ? err.message : err)
+    return []
+  }
+}
+
+export async function fetchScheduleOverrides(
+  dealerId: string,
+  fromDate: string,
+  toDate: string,
+): Promise<ScheduleOverrideRow[]> {
+  const client = getSupabase()
+  if (!client) return []
+  try {
+    const { data, error } = await client
+      .from('schedule_overrides')
+      .select('*')
+      .eq('dealer_id', dealerId)
+      .gte('override_date', fromDate)
+      .lte('override_date', toDate)
+    if (error) {
+      const code = (error as { code?: string }).code
+      if (code === '42P01') return []
+      throw error
+    }
+    return (data ?? []) as ScheduleOverrideRow[]
+  } catch (err) {
+    console.error('[Supabase] fetchScheduleOverrides failed:', err instanceof Error ? err.message : err)
+    return []
+  }
+}
+
+/** Count of non-cancelled appointments for (dealer, date). Used by the
+ *  available-slots search + the book_appointment capacity gate. */
+export async function countAppointmentsForDate(
+  dealerId: string,
+  date: string,
+): Promise<number> {
+  const client = getSupabase()
+  if (!client) return 0
+  try {
+    const { count, error } = await client
+      .from('appointments')
+      .select('*', { count: 'exact', head: true })
+      .eq('dealer_id', dealerId)
+      .eq('date', date)
+      .neq('status', 'cancelled')
+    if (error) {
+      const code = (error as { code?: string }).code
+      if (code === '42P01') return 0
+      throw error
+    }
+    return count ?? 0
+  } catch (err) {
+    console.error('[Supabase] countAppointmentsForDate failed:', err instanceof Error ? err.message : err)
+    return 0
+  }
+}
+
+/** Count of appointments at a specific (dealer, date, time) — used by
+ *  book_appointment to enforce per-slot capacity vs per-day capacity. */
+export async function countAppointmentsForSlot(
+  dealerId: string,
+  date: string,
+  time: string,
+): Promise<number> {
+  const client = getSupabase()
+  if (!client) return 0
+  try {
+    const { count, error } = await client
+      .from('appointments')
+      .select('*', { count: 'exact', head: true })
+      .eq('dealer_id', dealerId)
+      .eq('date', date)
+      .eq('time', time)
+      .neq('status', 'cancelled')
+    if (error) {
+      const code = (error as { code?: string }).code
+      if (code === '42P01') return 0
+      throw error
+    }
+    return count ?? 0
+  } catch (err) {
+    console.error('[Supabase] countAppointmentsForSlot failed:', err instanceof Error ? err.message : err)
+    return 0
+  }
+}
+
+/** True when at least one is_available loaner vehicle exists for the
+ *  dealer and is not assigned to an overlapping non-declined
+ *  loaner_requests row. False on Supabase miss / table missing so the
+ *  caller can communicate "loaner not guaranteed" rather than 500. */
+export async function hasLoanerAvailability(
+  dealerId: string,
+  startDate?: string | null,
+  endDate?: string | null,
+): Promise<boolean> {
+  const client = getSupabase()
+  if (!client) return false
+  try {
+    const { data, error } = await client
+      .from('loaner_vehicles')
+      .select('id,is_available')
+      .eq('dealer_id', dealerId)
+      .eq('is_available', true)
+    if (error) {
+      const code = (error as { code?: string }).code
+      if (code === '42P01') return false
+      throw error
+    }
+    const vehicles = (data ?? []) as Array<{ id: string }>
+    if (vehicles.length === 0) return false
+    if (!startDate || !endDate) return true
+
+    const reqs = await client
+      .from('loaner_requests')
+      .select('loaner_vehicle_id,start_date,end_date,status')
+      .eq('dealer_id', dealerId)
+      .not('loaner_vehicle_id', 'is', null)
+      .neq('status', 'declined')
+    if (reqs.error) {
+      const code = (reqs.error as { code?: string }).code
+      if (code === '42P01' || code === '42703') return vehicles.length > 0
+      throw reqs.error
+    }
+    const busy = new Set<string>()
+    for (const r of (reqs.data ?? []) as Array<{
+      loaner_vehicle_id: string | null
+      start_date: string | null
+      end_date: string | null
+    }>) {
+      if (!r.loaner_vehicle_id || !r.start_date || !r.end_date) continue
+      if (r.start_date <= endDate && r.end_date >= startDate) busy.add(r.loaner_vehicle_id)
+    }
+    return vehicles.some((v) => !busy.has(v.id))
+  } catch (err) {
+    console.error('[Supabase] hasLoanerAvailability failed:', err instanceof Error ? err.message : err)
+    return false
+  }
+}
+
 // ─── repair_order_assignments + departments (Phase 9b) ──────────────────────
 
 export interface RepairOrderAssignmentRow {
