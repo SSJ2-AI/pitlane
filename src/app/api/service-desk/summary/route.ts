@@ -2,6 +2,11 @@
 import { NextResponse } from 'next/server';
 import { getSupabase, type AppointmentRow, type LoanerRequestRow, type UpsellRow } from '@/lib/supabase';
 import { resolveDealerForRequest } from '@/lib/dealer';
+import {
+    enrichUpsellsFromMocks,
+    enrichUpsellsFromSupabase,
+    type UpsellWithContext,
+} from '@/lib/upsell-context';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,8 +28,9 @@ function getMockSummary(today: string) {
         { id: 'ups_002', call_log_id: 'call_002', customer_id: 'cust_002', dealer_id: 'dealer_porsche_toronto', vehicle_id: 'veh_002a', upsell_type: 'cabin_air_filter', description: 'Cabin Air Filter Replacement', value_est: 240, status: 'pending', created_at: new Date(Date.now() - 86400000).toISOString() },
         { id: 'ups_003', call_log_id: 'call_004', customer_id: 'cust_004', dealer_id: 'dealer_porsche_toronto', vehicle_id: 'veh_004a', upsell_type: 'software_update', description: 'Annual Taycan Software Update Package', value_est: 420, status: 'pending', created_at: new Date(Date.now() - 86400000 * 2).toISOString() },
     ];
-    const upsellValue = upsells.reduce((s, u) => s + (u.value_est ?? 0), 0);
-    return { persistence: 'supabase' as const, today, arrivals, loaner_queue, upsells, stats: { arrivals_count: arrivals.length, loaner_pending: loaner_queue.length, upsell_count: upsells.length, upsell_value: upsellValue } };
+    const enrichedUpsells: UpsellWithContext[] = enrichUpsellsFromMocks(upsells);
+    const upsellValue = enrichedUpsells.reduce((s, u) => s + (u.value_est ?? 0), 0);
+    return { persistence: 'supabase' as const, today, arrivals, loaner_queue, upsells: enrichedUpsells, stats: { arrivals_count: arrivals.length, loaner_pending: loaner_queue.length, upsell_count: enrichedUpsells.length, upsell_value: upsellValue } };
 }
 
 export async function GET(request: Request) {
@@ -34,7 +40,7 @@ export async function GET(request: Request) {
     }
     const supabase = getSupabase();
     if (!supabase) {
-        return NextResponse.json({ persistence: 'none' as const, today, arrivals: [] as AppointmentRow[], loaner_queue: [] as LoanerRequestRow[], upsells: [] as UpsellRow[], stats: { arrivals_count: 0, loaner_pending: 0, upsell_count: 0, upsell_value: 0 } });
+        return NextResponse.json({ persistence: 'none' as const, today, arrivals: [] as AppointmentRow[], loaner_queue: [] as LoanerRequestRow[], upsells: [] as UpsellWithContext[], stats: { arrivals_count: 0, loaner_pending: 0, upsell_count: 0, upsell_value: 0 } });
     }
     const dealer = await resolveDealerForRequest(request);
     const [arrivalsRes, loanersRes, upsellsRes] = await Promise.all([
@@ -47,7 +53,11 @@ export async function GET(request: Request) {
     if (upsellsRes.error) console.error('[/api/service-desk/summary] upsells:', upsellsRes.error.message);
     const arrivals = (arrivalsRes.data ?? []) as AppointmentRow[];
     const loaners = (loanersRes.data ?? []) as LoanerRequestRow[];
-    const upsells = (upsellsRes.data ?? []) as UpsellRow[];
-    const upsellValue = upsells.reduce((sum, u) => sum + (u.value_est ?? 0), 0);
-    return NextResponse.json({ persistence: 'supabase' as const, today, arrivals, loaner_queue: loaners, upsells, stats: { arrivals_count: arrivals.length, loaner_pending: loaners.length, upsell_count: upsells.length, upsell_value: upsellValue } });
+    const rawUpsells = (upsellsRes.data ?? []) as UpsellRow[];
+    // Phase 14: graft customer phone + tier + vehicle summary onto each
+    // upsell so the /service-desk pipeline panel shows whose upsell it is
+    // without forcing the advisor to click into /customers/[id].
+    const enrichedUpsells = await enrichUpsellsFromSupabase(supabase, rawUpsells);
+    const upsellValue = enrichedUpsells.reduce((sum, u) => sum + (u.value_est ?? 0), 0);
+    return NextResponse.json({ persistence: 'supabase' as const, today, arrivals, loaner_queue: loaners, upsells: enrichedUpsells, stats: { arrivals_count: arrivals.length, loaner_pending: loaners.length, upsell_count: enrichedUpsells.length, upsell_value: upsellValue } });
 }

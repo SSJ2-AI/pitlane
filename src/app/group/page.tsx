@@ -3,6 +3,8 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
+import { UpsellCustomerBar } from '@/components/UpsellCustomerBar';
+import type { UpsellWithContext } from '@/lib/upsell-context';
 
 // /group — Fixed Operations Manager (group_manager) dashboard.
 //
@@ -44,7 +46,16 @@ interface GroupSummary {
         warranty_alerts: number;
     };
     top_callback_reasons: Array<{ reason: string; count: number }>;
+    /** Phase 14 — group-wide pending upsells, each enriched with customer
+     *  phone / tier / vehicle so managers can triage without drilling in. */
+    upsells: UpsellWithContext[];
+    upsell_value: number;
     persistence: 'supabase' | 'mock';
+}
+
+function formatCurrency(value: number | null | undefined) {
+    if (value === null || value === undefined) return '—';
+    return new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD', maximumFractionDigits: 0 }).format(value);
 }
 
 function sentimentColor(score: number | null): string {
@@ -186,6 +197,43 @@ export default function GroupDashboard() {
                                         </li>
                                     )}
                                 </ul>
+                            </section>
+
+                            <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-5 lg:col-span-2">
+                                <header className="flex flex-wrap items-end justify-between gap-3">
+                                    <div>
+                                        <p className="text-xs font-semibold uppercase tracking-[0.28em] text-zinc-500">Aria-flagged upsells</p>
+                                        <h3 className="mt-2 text-xl font-black text-white">Pending across every rooftop</h3>
+                                        <p className="mt-1 text-xs text-zinc-500">
+                                            Top {data.upsells.length} pending opportunities ranked by estimated value. Click into a customer to act on the offer.
+                                        </p>
+                                    </div>
+                                    <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-bold uppercase tracking-[0.18em] text-emerald-200">
+                                        {formatCurrency(data.upsell_value)} potential
+                                    </span>
+                                </header>
+                                {data.upsells.length === 0 ? (
+                                    <p className="mt-4 rounded-2xl border border-dashed border-zinc-800 bg-zinc-950 px-4 py-3 text-xs italic text-zinc-500">
+                                        No pending upsells across the group right now.
+                                    </p>
+                                ) : (
+                                    <ul className="mt-4 grid gap-3 lg:grid-cols-2">
+                                        {data.upsells.map((u) => (
+                                            <li key={u.id} className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                                                <UpsellCustomerBar upsell={u} />
+                                                <div className="mt-3 flex items-start justify-between gap-3">
+                                                    <div className="min-w-0">
+                                                        <p className="text-sm font-black text-white">{u.upsell_type}</p>
+                                                        {u.description && (
+                                                            <p className="mt-1 text-xs text-zinc-300">{u.description}</p>
+                                                        )}
+                                                    </div>
+                                                    <p className="text-lg font-black text-emerald-300">{formatCurrency(u.value_est)}</p>
+                                                </div>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                )}
                             </section>
 
                             <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-5">

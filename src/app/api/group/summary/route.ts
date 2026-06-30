@@ -4,6 +4,12 @@ import { getSupabase } from '@/lib/supabase';
 import { canViewGroupConsole, readSessionFromRequest } from '@/lib/role';
 import { getVehicleWarrantyInfo, MOCK_VEHICLES } from '@/lib/mock-vehicles';
 import { recordAudit } from '@/lib/audit';
+import {
+    enrichUpsellsFromMocks,
+    enrichUpsellsFromSupabase,
+    type UpsellWithContext,
+} from '@/lib/upsell-context';
+import type { UpsellRow } from '@/lib/supabase';
 
 // GET /api/group/summary
 //
@@ -42,6 +48,11 @@ interface GroupSummary {
         warranty_alerts: number;
     };
     top_callback_reasons: Array<{ reason: string; count: number }>;
+    /** Phase 14 — pending upsells across every rooftop, each enriched
+     *  with customer phone / tier / vehicle so managers can triage
+     *  without clicking into each customer profile. */
+    upsells: UpsellWithContext[];
+    upsell_value: number;
     persistence: 'supabase' | 'mock';
 }
 
@@ -128,6 +139,19 @@ function getMockSummary(): GroupSummary {
         { dealers_count: 0, calls_today: 0, calls_this_week: 0, callbacks_pending: 0, open_repair_orders: 0, loaners_active: 0, warranty_alerts: 0 },
     );
 
+    // Mock pending upsells — mirror the service-desk mock dataset so the
+    // group view has something to render in demo mode. Distributed across
+    // a couple of customers / dealers so the panel actually looks like
+    // an aggregate.
+    const mockUpsells: UpsellRow[] = [
+        { id: 'ups_001', call_log_id: 'call_001', customer_id: 'cust_001', dealer_id: 'aaaaaaaa-0000-0000-0000-000000000001', vehicle_id: 'veh_001a', upsell_type: 'brake_replacement', description: 'Rear Brake Replacement — previously declined Nov 2025', value_est: 875, status: 'pending', created_at: new Date(Date.now() - 86400000 * 3).toISOString() },
+        { id: 'ups_002', call_log_id: 'call_002', customer_id: 'cust_002', dealer_id: 'aaaaaaaa-0000-0000-0000-000000000001', vehicle_id: 'veh_002a', upsell_type: 'cabin_air_filter', description: 'Cabin Air Filter Replacement', value_est: 240, status: 'pending', created_at: new Date(Date.now() - 86400000).toISOString() },
+        { id: 'ups_003', call_log_id: 'call_004', customer_id: 'cust_004', dealer_id: 'aaaaaaaa-0000-0000-0000-000000000002', vehicle_id: 'veh_004a', upsell_type: 'software_update', description: 'Annual Software Update Package', value_est: 420, status: 'pending', created_at: new Date(Date.now() - 86400000 * 2).toISOString() },
+        { id: 'ups_004', call_log_id: 'call_005', customer_id: 'cust_005', dealer_id: 'aaaaaaaa-0000-0000-0000-000000000001', vehicle_id: 'veh_005a', upsell_type: 'tire_replacement', description: 'Track-day tire set — Cup 2 R 305/30/20', value_est: 3850, status: 'pending', created_at: new Date(Date.now() - 86400000 * 5).toISOString() },
+    ];
+    const upsells = enrichUpsellsFromMocks(mockUpsells);
+    const upsell_value = upsells.reduce((s, u) => s + (u.value_est ?? 0), 0);
+
     return {
         dealers,
         totals,
@@ -137,6 +161,8 @@ function getMockSummary(): GroupSummary {
             { reason: 'Loaner confirmation', count: 2 },
             { reason: 'Recall question', count: 2 },
         ],
+        upsells,
+        upsell_value,
         persistence: 'mock',
     };
 }
@@ -235,7 +261,31 @@ export async function GET(request: Request) {
             .slice(0, 5)
             .map(([reason, count]) => ({ reason, count }));
 
-        return NextResponse.json({ dealers: perDealer, totals, top_callback_reasons, persistence: 'supabase' });
+        // Phase 14 — group-wide pending upsells panel. Pulls every pending
+        // upsell across the group (capped at 50 to keep the payload bounded)
+        // and enriches each with customer phone / tier / vehicle so the
+        // manager can triage from one screen.
+        let upsells: UpsellWithContext[] = [];
+        let upsell_value = 0;
+        try {
+            const { data: rawUpsells, error: upsellsError } = await supabase
+                .from('upsells')
+                .select('*')
+                .eq('status', 'pending')
+                .order('value_est', { ascending: false, nullsFirst: false })
+                .limit(50);
+            if (upsellsError) {
+                console.error('[/api/group/summary] upsells query failed:', upsellsError.message);
+            } else {
+                upsells = await enrichUpsellsFromSupabase(supabase, (rawUpsells ?? []) as UpsellRow[]);
+                upsell_value = upsells.reduce((s, u) => s + (u.value_est ?? 0), 0);
+            }
+        } catch (err) {
+            console.error('[/api/group/summary] upsells enrich threw:',
+                err instanceof Error ? err.message : err);
+        }
+
+        return NextResponse.json({ dealers: perDealer, totals, top_callback_reasons, upsells, upsell_value, persistence: 'supabase' });
     } catch (err) {
         console.error('[/api/group/summary] aggregation threw:', err instanceof Error ? err.message : err);
         return NextResponse.json(getMockSummary());
