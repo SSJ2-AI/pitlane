@@ -2,8 +2,10 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
-import type { AppointmentRow, CallbackRequestRow, LoanerRequestRow, UpsellRow } from '@/lib/supabase';
+import type { AppointmentRow, CallbackRequestRow, LoanerRequestRow } from '@/lib/supabase';
+import type { UpsellWithContext } from '@/lib/upsell-context';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
+import { UpsellCustomerBar } from '@/components/UpsellCustomerBar';
 
 const CALLBACK_SENTIMENT_STYLES: Record<string, string> = {
     positive: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200',
@@ -24,7 +26,7 @@ interface SummaryResponse {
     today: string;
     arrivals: AppointmentRow[];
     loaner_queue: LoanerRequestRow[];
-    upsells: UpsellRow[];
+    upsells: UpsellWithContext[];
     stats: {
         arrivals_count: number;
         loaner_pending: number;
@@ -382,11 +384,15 @@ export default function ServiceDeskPage() {
                         <ul className="grid gap-3 lg:grid-cols-2">
                             {data?.upsells.map((u) => (
                                 <li key={u.id} className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
-                                    <div className="flex items-start justify-between gap-3">
+                                    {/* Phase 14 — customer context bar lives at the top of
+                                        the card so advisors can recognise whose upsell
+                                        this is at a glance. */}
+                                    <UpsellCustomerBar upsell={u} />
+                                    <div className="mt-3 flex items-start justify-between gap-3">
                                         <div className="min-w-0">
                                             <p className="text-sm font-black text-white">{u.upsell_type}</p>
                                             <p className="text-[10px] uppercase tracking-[0.22em] text-zinc-500 mt-1">
-                                                Customer {u.customer_id} · Vehicle {u.vehicle_id}
+                                                Flagged {formatRelative(u.created_at)}
                                             </p>
                                             {u.description && <p className="mt-2 text-xs text-zinc-300">{u.description}</p>}
                                         </div>
