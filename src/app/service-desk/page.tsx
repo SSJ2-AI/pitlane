@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import type { AppointmentRow, CallbackRequestRow, LoanerRequestRow, UpsellRow } from '@/lib/supabase';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
+import { formatCustomerPhone, normalizeCustomerTier, TIER_STYLES } from '@/lib/customer-display';
 
 const CALLBACK_SENTIMENT_STYLES: Record<string, string> = {
     positive: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200',
@@ -24,7 +25,7 @@ interface SummaryResponse {
     today: string;
     arrivals: AppointmentRow[];
     loaner_queue: LoanerRequestRow[];
-    upsells: UpsellRow[];
+    upsells: DashboardUpsell[];
     stats: {
         arrivals_count: number;
         loaner_pending: number;
@@ -34,6 +35,12 @@ interface SummaryResponse {
 }
 
 const REFRESH_INTERVAL_MS = 15_000;
+
+type DashboardUpsell = UpsellRow & {
+    customer_phone?: string | null;
+    customer_tier?: string | null;
+    vehicle_summary?: string | null;
+};
 
 function formatCurrency(value: number | null | undefined) {
     if (value === null || value === undefined) return '—';
@@ -52,11 +59,26 @@ function formatRelative(iso: string) {
     }
 }
 
+function formatDate(iso: string) {
+    try {
+        return new Date(iso).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' });
+    } catch {
+        return iso;
+    }
+}
+
 const APPT_STATUS_STYLES: Record<string, string> = {
     confirmed: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200',
     scheduled: 'border-amber-500/40 bg-amber-500/10 text-amber-200',
     cancelled: 'border-zinc-700 bg-zinc-950 text-zinc-300',
     completed: 'border-sky-500/40 bg-sky-500/10 text-sky-200',
+};
+
+const UPSELL_STATUS_STYLES: Record<string, string> = {
+    pending: 'border-amber-500/40 bg-amber-500/10 text-amber-200',
+    accepted: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200',
+    declined: 'border-zinc-700 bg-zinc-900 text-zinc-300',
+    expired: 'border-zinc-700 bg-zinc-900 text-zinc-400',
 };
 
 export default function ServiceDeskPage() {
@@ -380,15 +402,41 @@ export default function ServiceDeskPage() {
                         {loading && !data && <EmptyState label="Loading upsells…" />}
                         {!loading && (data?.upsells.length ?? 0) === 0 && <EmptyState label="No open upsells in the pipeline." />}
                         <ul className="grid gap-3 lg:grid-cols-2">
-                            {data?.upsells.map((u) => (
+                            {data?.upsells.map((u) => {
+                                const tier = normalizeCustomerTier(u.customer_tier);
+                                return (
                                 <li key={u.id} className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
                                     <div className="flex items-start justify-between gap-3">
                                         <div className="min-w-0">
-                                            <p className="text-sm font-black text-white">{u.upsell_type}</p>
-                                            <p className="text-[10px] uppercase tracking-[0.22em] text-zinc-500 mt-1">
-                                                Customer {u.customer_id} · Vehicle {u.vehicle_id}
-                                            </p>
+                                            <p className="text-sm font-black text-white">{u.upsell_type.replace(/_/g, ' ')}</p>
+                                            <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-zinc-500">
+                                                {tier ? (
+                                                    <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold tracking-[0.18em] ${TIER_STYLES[tier]}`}>
+                                                        {tier}
+                                                    </span>
+                                                ) : (
+                                                    <span className="rounded-full border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[10px] font-bold tracking-[0.18em] text-zinc-300">
+                                                        Tier unknown
+                                                    </span>
+                                                )}
+                                                <span>{formatCustomerPhone(u.customer_phone)}</span>
+                                            </div>
+                                            <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.22em] text-zinc-500">
+                                                <span>{u.vehicle_summary ?? 'Vehicle unavailable'}</span>
+                                                <Link
+                                                    href={`/customers/${encodeURIComponent(u.customer_id)}`}
+                                                    className="rounded-full border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-200 transition hover:border-red-500 hover:text-white"
+                                                >
+                                                    View profile
+                                                </Link>
+                                            </div>
                                             {u.description && <p className="mt-2 text-xs text-zinc-300">{u.description}</p>}
+                                            <div className="mt-2 flex flex-wrap items-center gap-2">
+                                                <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] ${UPSELL_STATUS_STYLES[u.status] ?? UPSELL_STATUS_STYLES.pending}`}>
+                                                    {u.status}
+                                                </span>
+                                                <span className="text-[10px] uppercase tracking-[0.22em] text-zinc-500">{formatDate(u.created_at)}</span>
+                                            </div>
                                         </div>
                                         <p className="text-lg font-black text-emerald-300">{formatCurrency(u.value_est)}</p>
                                     </div>
@@ -399,7 +447,7 @@ export default function ServiceDeskPage() {
                                             onClick={() => void patchUpsell(u.id, 'accepted')}
                                             className="flex-1 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.18em] text-emerald-200 transition hover:border-emerald-400 hover:bg-emerald-500/20 disabled:opacity-50"
                                         >
-                                            Accepted
+                                            Accept
                                         </button>
                                         <button
                                             type="button"
@@ -407,11 +455,12 @@ export default function ServiceDeskPage() {
                                             onClick={() => void patchUpsell(u.id, 'declined')}
                                             className="flex-1 rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs font-bold uppercase tracking-[0.18em] text-zinc-300 transition hover:border-zinc-500 hover:text-white disabled:opacity-50"
                                         >
-                                            Declined
+                                            Decline
                                         </button>
                                     </div>
                                 </li>
-                            ))}
+                                );
+                            })}
                         </ul>
                     </section>
                 </div>

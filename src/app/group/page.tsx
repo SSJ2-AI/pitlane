@@ -3,6 +3,8 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
+import type { UpsellRow } from '@/lib/supabase';
+import { formatCustomerPhone, normalizeCustomerTier, TIER_STYLES } from '@/lib/customer-display';
 
 // /group — Fixed Operations Manager (group_manager) dashboard.
 //
@@ -47,6 +49,25 @@ interface GroupSummary {
     persistence: 'supabase' | 'mock';
 }
 
+type PendingUpsellRow = UpsellRow & {
+    customer_phone?: string | null;
+    customer_tier?: string | null;
+    vehicle_summary?: string | null;
+};
+
+interface PendingUpsellsResponse {
+    upsells: PendingUpsellRow[];
+    total: number;
+    persistence: 'supabase' | 'mock' | 'none';
+}
+
+const UPSELL_STATUS_STYLES: Record<string, string> = {
+    pending: 'border-amber-500/40 bg-amber-500/10 text-amber-200',
+    accepted: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200',
+    declined: 'border-zinc-700 bg-zinc-900 text-zinc-300',
+    expired: 'border-zinc-700 bg-zinc-900 text-zinc-400',
+};
+
 function sentimentColor(score: number | null): string {
     if (score === null) return 'text-zinc-300';
     if (score >= 0.75) return 'text-emerald-300';
@@ -54,16 +75,39 @@ function sentimentColor(score: number | null): string {
     return 'text-red-300';
 }
 
+function formatCurrency(value: number | null | undefined): string {
+    if (value === null || value === undefined) return '—';
+    return new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD', maximumFractionDigits: 0 }).format(value);
+}
+
+function formatDate(iso: string | null | undefined): string {
+    if (!iso) return '—';
+    try {
+        return new Date(iso).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' });
+    } catch {
+        return iso;
+    }
+}
+
 export default function GroupDashboard() {
     const [data, setData] = useState<GroupSummary | null>(null);
+    const [pendingUpsells, setPendingUpsells] = useState<PendingUpsellRow[]>([]);
     const [loading, setLoading] = useState(true);
+    const [upsellsLoading, setUpsellsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [upsellError, setUpsellError] = useState<string | null>(null);
+    const [upsellActionFor, setUpsellActionFor] = useState<string | null>(null);
 
     const load = useCallback(async () => {
         setLoading(true);
+        setUpsellsLoading(true);
         setError(null);
+        setUpsellError(null);
         try {
-            const r = await fetch('/api/group/summary', { cache: 'no-store' });
+            const [r, upsellsRes] = await Promise.all([
+                fetch('/api/group/summary', { cache: 'no-store' }),
+                fetch('/api/upsells/pending?limit=12', { cache: 'no-store' }),
+            ]);
             if (!r.ok) {
                 if (r.status === 403) {
                     setError('Forbidden — this console is for group managers.');
@@ -73,16 +117,49 @@ export default function GroupDashboard() {
             }
             const payload = (await r.json()) as GroupSummary;
             setData(payload);
+
+            const upsellsPayload = (await upsellsRes.json()) as PendingUpsellsResponse & { error?: string };
+            if (!upsellsRes.ok) {
+                setUpsellError(upsellsPayload.error ?? `HTTP ${upsellsRes.status}`);
+                setPendingUpsells([]);
+            } else {
+                setPendingUpsells(upsellsPayload.upsells ?? []);
+            }
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Failed to load group summary');
+            setPendingUpsells([]);
         } finally {
             setLoading(false);
+            setUpsellsLoading(false);
         }
     }, []);
+
+    async function patchUpsell(id: string, status: 'accepted' | 'declined') {
+        setUpsellActionFor(id);
+        setUpsellError(null);
+        try {
+            const response = await fetch(`/api/upsells/${id}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status }),
+            });
+            if (!response.ok) {
+                const body = await response.json().catch(() => ({}));
+                throw new Error(typeof body?.error === 'string' ? body.error : `HTTP ${response.status}`);
+            }
+            await load();
+        } catch (err) {
+            setUpsellError(err instanceof Error ? err.message : 'Failed to update upsell');
+        } finally {
+            setUpsellActionFor(null);
+        }
+    }
 
     useEffect(() => {
         void load();
     }, [load]);
+
+    const pendingUpsellValue = pendingUpsells.reduce((sum, row) => sum + (row.value_est ?? 0), 0);
 
     return (
         <main className="min-h-screen bg-[#09090b] text-zinc-100">
@@ -208,6 +285,99 @@ export default function GroupDashboard() {
                                 </ol>
                             </section>
                         </div>
+
+                        <section className="mt-3 rounded-3xl border border-zinc-800 bg-zinc-900 p-5">
+                            <header className="mb-4 flex items-end justify-between gap-3">
+                                <div>
+                                    <p className="text-xs font-semibold uppercase tracking-[0.28em] text-zinc-500">Group upsell queue</p>
+                                    <h3 className="mt-2 text-xl font-black text-white">Aria-flagged opportunities</h3>
+                                </div>
+                                <div className="text-right">
+                                    <p className="text-xs uppercase tracking-[0.22em] text-zinc-500">{pendingUpsells.length} pending</p>
+                                    <p className="text-lg font-black text-emerald-300">{formatCurrency(pendingUpsellValue)}</p>
+                                </div>
+                            </header>
+
+                            {upsellError && (
+                                <p className="mb-3 rounded-2xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-100">{upsellError}</p>
+                            )}
+                            {upsellsLoading && pendingUpsells.length === 0 && (
+                                <p className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-950 px-4 py-6 text-center text-sm text-zinc-400">
+                                    Loading pending upsells…
+                                </p>
+                            )}
+                            {!upsellsLoading && pendingUpsells.length === 0 && (
+                                <p className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-950 px-4 py-6 text-center text-sm text-zinc-400">
+                                    No pending upsells across the group.
+                                </p>
+                            )}
+                            <ul className="grid gap-3 lg:grid-cols-2">
+                                {pendingUpsells.map((upsell) => {
+                                    const tier = normalizeCustomerTier(upsell.customer_tier);
+                                    const dealerName =
+                                        data.dealers.find((dealer) => dealer.dealer_id === upsell.dealer_id)?.dealer_name ??
+                                        upsell.dealer_id ??
+                                        'Unknown dealer';
+                                    return (
+                                        <li key={upsell.id} className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                                            <div className="flex items-start justify-between gap-3">
+                                                <div className="min-w-0">
+                                                    <p className="text-sm font-black text-white">{upsell.upsell_type.replace(/_/g, ' ')}</p>
+                                                    <p className="mt-1 text-[10px] uppercase tracking-[0.2em] text-zinc-500">{dealerName}</p>
+                                                    <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-zinc-500">
+                                                        {tier ? (
+                                                            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold tracking-[0.18em] ${TIER_STYLES[tier]}`}>
+                                                                {tier}
+                                                            </span>
+                                                        ) : (
+                                                            <span className="rounded-full border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[10px] font-bold tracking-[0.18em] text-zinc-300">
+                                                                Tier unknown
+                                                            </span>
+                                                        )}
+                                                        <span>{formatCustomerPhone(upsell.customer_phone)}</span>
+                                                    </div>
+                                                    <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.22em] text-zinc-500">
+                                                        <span>{upsell.vehicle_summary ?? 'Vehicle unavailable'}</span>
+                                                        <Link
+                                                            href={`/customers/${encodeURIComponent(upsell.customer_id)}`}
+                                                            className="rounded-full border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-200 transition hover:border-red-500 hover:text-white"
+                                                        >
+                                                            View profile
+                                                        </Link>
+                                                    </div>
+                                                    {upsell.description && <p className="mt-2 text-xs text-zinc-300">{upsell.description}</p>}
+                                                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                                                        <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] ${UPSELL_STATUS_STYLES[upsell.status] ?? UPSELL_STATUS_STYLES.pending}`}>
+                                                            {upsell.status}
+                                                        </span>
+                                                        <span className="text-[10px] uppercase tracking-[0.22em] text-zinc-500">{formatDate(upsell.created_at)}</span>
+                                                    </div>
+                                                </div>
+                                                <p className="text-lg font-black text-emerald-300">{formatCurrency(upsell.value_est)}</p>
+                                            </div>
+                                            <div className="mt-3 flex gap-2">
+                                                <button
+                                                    type="button"
+                                                    disabled={upsellActionFor === upsell.id}
+                                                    onClick={() => void patchUpsell(upsell.id, 'accepted')}
+                                                    className="flex-1 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.18em] text-emerald-200 transition hover:border-emerald-400 hover:bg-emerald-500/20 disabled:opacity-50"
+                                                >
+                                                    Accept
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    disabled={upsellActionFor === upsell.id}
+                                                    onClick={() => void patchUpsell(upsell.id, 'declined')}
+                                                    className="flex-1 rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs font-bold uppercase tracking-[0.18em] text-zinc-300 transition hover:border-zinc-500 hover:text-white disabled:opacity-50"
+                                                >
+                                                    Decline
+                                                </button>
+                                            </div>
+                                        </li>
+                                    );
+                                })}
+                            </ul>
+                        </section>
                     </>
                 )}
             </section>
