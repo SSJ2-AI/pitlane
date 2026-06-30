@@ -103,6 +103,13 @@ export interface CallLogRow {
     created_at: string;
 }
 
+export type AppointmentStatus =
+    | 'confirmed'
+    | 'checked_in'
+    | 'in_progress'
+    | 'completed'
+    | 'cancelled';
+
 export interface AppointmentRow {
     id: string;
     customer_id: string;
@@ -118,6 +125,10 @@ export interface AppointmentRow {
     cdk_id: string | null;
     call_log_id: string | null;
     created_at: string;
+    /** Phase 15 (migration 0015): lifecycle timestamps + reschedule self-FK. */
+    checked_in_at?: string | null;
+    completed_at?: string | null;
+    rescheduled_from?: string | null;
 }
 
 export interface UpsellRow {

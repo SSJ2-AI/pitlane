@@ -34,7 +34,10 @@ export type AuditAction =
     | 'create_loaner_vehicle'
     | 'update_loaner_vehicle'
     | 'delete_loaner_vehicle'
-    | 'loaner_request_created';
+    | 'loaner_request_created'
+    // Phase 15 — appointment status lifecycle
+    | 'appointment_status_transition'
+    | 'appointment_rescheduled';
 
 export interface AuditEntry {
     action: AuditAction;

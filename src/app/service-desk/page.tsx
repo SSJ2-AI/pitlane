@@ -57,9 +57,22 @@ function formatRelative(iso: string) {
 const APPT_STATUS_STYLES: Record<string, string> = {
     confirmed: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200',
     scheduled: 'border-amber-500/40 bg-amber-500/10 text-amber-200',
+    checked_in: 'border-sky-500/40 bg-sky-500/10 text-sky-200',
+    in_progress: 'border-amber-500/40 bg-amber-500/10 text-amber-200',
     cancelled: 'border-zinc-700 bg-zinc-950 text-zinc-300',
-    completed: 'border-sky-500/40 bg-sky-500/10 text-sky-200',
+    completed: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200',
 };
+
+const APPT_STATUS_LABELS: Record<string, string> = {
+    confirmed: 'Confirmed',
+    scheduled: 'Scheduled',
+    checked_in: 'Checked in',
+    in_progress: 'In progress',
+    completed: 'Completed',
+    cancelled: 'Cancelled',
+};
+
+type ApptStatusTarget = 'checked_in' | 'in_progress' | 'completed' | 'cancelled';
 
 export default function ServiceDeskPage() {
     const [data, setData] = useState<SummaryResponse | null>(null);
@@ -67,6 +80,10 @@ export default function ServiceDeskPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [actionFor, setActionFor] = useState<string | null>(null);
+    const [rescheduleFor, setRescheduleFor] = useState<string | null>(null);
+    const [rescheduleDate, setRescheduleDate] = useState('');
+    const [rescheduleTime, setRescheduleTime] = useState('');
+    const [doneTodayOpen, setDoneTodayOpen] = useState(false);
 
     const load = useCallback(async () => {
         try {
@@ -170,7 +187,74 @@ export default function ServiceDeskPage() {
         }
     }
 
+    async function patchAppointmentStatus(id: string, status: ApptStatusTarget) {
+        setActionFor(id);
+        try {
+            const response = await fetch(`/api/appointments/${id}/status`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status }),
+            });
+            if (!response.ok) {
+                const body = await response.json().catch(() => ({}));
+                throw new Error(typeof body?.error === 'string' ? body.error : `HTTP ${response.status}`);
+            }
+            // Phase 15: trigger an immediate data refresh rather than waiting
+            // for the 15s poll so the card flips state for the advisor.
+            await load();
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Failed to update appointment');
+        } finally {
+            setActionFor(null);
+        }
+    }
+
+    function openReschedule(appt: AppointmentRow) {
+        setRescheduleFor(appt.id);
+        setRescheduleDate(appt.date);
+        // Trim seconds for the <input type="time"> control which expects HH:MM.
+        setRescheduleTime((appt.time ?? '').slice(0, 5));
+    }
+
+    function closeReschedule() {
+        setRescheduleFor(null);
+        setRescheduleDate('');
+        setRescheduleTime('');
+    }
+
+    async function submitReschedule(id: string) {
+        if (!rescheduleDate || !rescheduleTime) {
+            setError('Pick a new date and time before saving');
+            return;
+        }
+        setActionFor(id);
+        try {
+            const response = await fetch(`/api/appointments/${id}/reschedule`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    new_date: rescheduleDate,
+                    // API accepts HH:MM or HH:MM:SS; pad with :00 so the
+                    // Postgres `time` column stores a deterministic value.
+                    new_time: rescheduleTime.length === 5 ? `${rescheduleTime}:00` : rescheduleTime,
+                }),
+            });
+            if (!response.ok) {
+                const body = await response.json().catch(() => ({}));
+                throw new Error(typeof body?.error === 'string' ? body.error : `HTTP ${response.status}`);
+            }
+            closeReschedule();
+            await load();
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Failed to reschedule appointment');
+        } finally {
+            setActionFor(null);
+        }
+    }
+
     const stats = data?.stats;
+    const activeArrivals = data?.arrivals.filter((a) => a.status !== 'completed' && a.status !== 'cancelled') ?? [];
+    const doneArrivals = data?.arrivals.filter((a) => a.status === 'completed' || a.status === 'cancelled') ?? [];
 
     return (
         <main className="min-h-screen bg-[#09090b] text-zinc-100">
@@ -295,29 +379,57 @@ export default function ServiceDeskPage() {
                         {loading && !data && <EmptyState label="Loading arrivals…" />}
                         {!loading && (data?.arrivals.length ?? 0) === 0 && <EmptyState label="No arrivals on the board for today." />}
                         <ul className="space-y-3">
-                            {data?.arrivals.map((appt) => (
-                                <li key={appt.id} className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
-                                    <div className="flex flex-wrap items-start justify-between gap-3">
-                                        <div className="min-w-0">
-                                            <p className="text-sm font-black text-white">{appt.service_type}</p>
-                                            <p className="text-xs text-zinc-400">
-                                                {appt.time}
-                                                {appt.advisor ? ` · ${appt.advisor}` : ''}
-                                                {appt.duration_est_hours ? ` · ${appt.duration_est_hours}h` : ''}
-                                            </p>
-                                        </div>
-                                        <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] ${APPT_STATUS_STYLES[appt.status] ?? APPT_STATUS_STYLES.confirmed}`}>
-                                            {appt.status}
-                                        </span>
-                                    </div>
-                                    <div className="mt-2 flex flex-wrap gap-2 text-[10px] uppercase tracking-[0.22em] text-zinc-500">
-                                        <span>Customer {appt.customer_id}</span>
-                                        <span>Vehicle {appt.vehicle_id}</span>
-                                        {appt.confirmation_number && <span>{appt.confirmation_number}</span>}
-                                    </div>
-                                </li>
+                            {activeArrivals.map((appt) => (
+                                <AppointmentCard
+                                    key={appt.id}
+                                    appt={appt}
+                                    busy={actionFor === appt.id}
+                                    rescheduleOpen={rescheduleFor === appt.id}
+                                    rescheduleDate={rescheduleDate}
+                                    rescheduleTime={rescheduleTime}
+                                    onRescheduleDateChange={setRescheduleDate}
+                                    onRescheduleTimeChange={setRescheduleTime}
+                                    onStatus={(target) => void patchAppointmentStatus(appt.id, target)}
+                                    onOpenReschedule={() => openReschedule(appt)}
+                                    onCancelReschedule={closeReschedule}
+                                    onSubmitReschedule={() => void submitReschedule(appt.id)}
+                                />
                             ))}
                         </ul>
+                        {doneArrivals.length > 0 && (
+                            <div className="mt-4 rounded-2xl border border-zinc-800 bg-zinc-950">
+                                <button
+                                    type="button"
+                                    onClick={() => setDoneTodayOpen((v) => !v)}
+                                    aria-expanded={doneTodayOpen}
+                                    className="flex w-full items-center justify-between px-4 py-3 text-left text-xs font-bold uppercase tracking-[0.22em] text-zinc-400 transition hover:text-white"
+                                >
+                                    <span>Done today · {doneArrivals.length}</span>
+                                    <span aria-hidden>{doneTodayOpen ? '▾' : '▸'}</span>
+                                </button>
+                                {doneTodayOpen && (
+                                    <ul className="space-y-2 border-t border-zinc-800 px-4 py-3">
+                                        {doneArrivals.map((appt) => (
+                                            <AppointmentCard
+                                                key={appt.id}
+                                                appt={appt}
+                                                busy={false}
+                                                rescheduleOpen={false}
+                                                rescheduleDate=""
+                                                rescheduleTime=""
+                                                onRescheduleDateChange={() => {}}
+                                                onRescheduleTimeChange={() => {}}
+                                                onStatus={() => {}}
+                                                onOpenReschedule={() => {}}
+                                                onCancelReschedule={() => {}}
+                                                onSubmitReschedule={() => {}}
+                                                compact
+                                            />
+                                        ))}
+                                    </ul>
+                                )}
+                            </div>
+                        )}
                     </section>
 
                     <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-5">
@@ -446,5 +558,148 @@ function EmptyState({ label }: { label: string }) {
         <p className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-950 px-4 py-6 text-center text-sm text-zinc-400">
             {label}
         </p>
+    );
+}
+
+interface AppointmentCardProps {
+    appt: AppointmentRow;
+    busy: boolean;
+    rescheduleOpen: boolean;
+    rescheduleDate: string;
+    rescheduleTime: string;
+    onRescheduleDateChange: (value: string) => void;
+    onRescheduleTimeChange: (value: string) => void;
+    onStatus: (target: ApptStatusTarget) => void;
+    onOpenReschedule: () => void;
+    onCancelReschedule: () => void;
+    onSubmitReschedule: () => void;
+    compact?: boolean;
+}
+
+function AppointmentCard({
+    appt,
+    busy,
+    rescheduleOpen,
+    rescheduleDate,
+    rescheduleTime,
+    onRescheduleDateChange,
+    onRescheduleTimeChange,
+    onStatus,
+    onOpenReschedule,
+    onCancelReschedule,
+    onSubmitReschedule,
+    compact,
+}: AppointmentCardProps) {
+    const statusCls = APPT_STATUS_STYLES[appt.status] ?? APPT_STATUS_STYLES.confirmed;
+    const statusLabel = APPT_STATUS_LABELS[appt.status] ?? appt.status;
+    const isTerminal = appt.status === 'completed' || appt.status === 'cancelled';
+    return (
+        <li className={`rounded-2xl border border-zinc-800 bg-zinc-950 ${compact ? 'p-3' : 'p-4'}`}>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0">
+                    <p className="text-sm font-black text-white">{appt.service_type}</p>
+                    <p className="text-xs text-zinc-400">
+                        {appt.time}
+                        {appt.advisor ? ` · ${appt.advisor}` : ''}
+                        {appt.duration_est_hours ? ` · ${appt.duration_est_hours}h` : ''}
+                    </p>
+                </div>
+                <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] ${statusCls}`}>
+                    {statusLabel}
+                </span>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2 text-[10px] uppercase tracking-[0.22em] text-zinc-500">
+                <span>Customer {appt.customer_id}</span>
+                <span>Vehicle {appt.vehicle_id}</span>
+                {appt.confirmation_number && <span>{appt.confirmation_number}</span>}
+            </div>
+
+            {!isTerminal && (
+                <div className="mt-3 flex flex-wrap gap-2">
+                    {appt.status === 'confirmed' && (
+                        <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => onStatus('checked_in')}
+                            className="flex-1 rounded-xl border border-sky-500/40 bg-sky-500/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.18em] text-sky-200 transition hover:border-sky-300 hover:bg-sky-500/20 disabled:opacity-50"
+                        >
+                            Check in
+                        </button>
+                    )}
+                    {appt.status === 'checked_in' && (
+                        <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => onStatus('in_progress')}
+                            className="flex-1 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.18em] text-amber-200 transition hover:border-amber-300 hover:bg-amber-500/20 disabled:opacity-50"
+                        >
+                            Mark in progress
+                        </button>
+                    )}
+                    {(appt.status === 'checked_in' || appt.status === 'in_progress') && (
+                        <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => onStatus('completed')}
+                            className="flex-1 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.18em] text-emerald-200 transition hover:border-emerald-400 hover:bg-emerald-500/20 disabled:opacity-50"
+                        >
+                            Complete service
+                        </button>
+                    )}
+                    <button
+                        type="button"
+                        disabled={busy}
+                        onClick={onOpenReschedule}
+                        className="flex-1 rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs font-bold uppercase tracking-[0.18em] text-zinc-200 transition hover:border-zinc-500 hover:text-white disabled:opacity-50"
+                    >
+                        Reschedule
+                    </button>
+                </div>
+            )}
+
+            {rescheduleOpen && !isTerminal && (
+                <div className="mt-3 rounded-xl border border-zinc-800 bg-zinc-900 p-3">
+                    <p className="mb-2 text-[10px] font-bold uppercase tracking-[0.22em] text-zinc-400">Move appointment</p>
+                    <div className="flex flex-wrap items-end gap-2">
+                        <label className="flex flex-col text-[10px] uppercase tracking-[0.18em] text-zinc-500">
+                            New date
+                            <input
+                                type="date"
+                                value={rescheduleDate}
+                                onChange={(e) => onRescheduleDateChange(e.target.value)}
+                                className="mt-1 rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1 text-sm text-zinc-100 focus:border-red-500 focus:outline-none"
+                            />
+                        </label>
+                        <label className="flex flex-col text-[10px] uppercase tracking-[0.18em] text-zinc-500">
+                            New time
+                            <input
+                                type="time"
+                                value={rescheduleTime}
+                                onChange={(e) => onRescheduleTimeChange(e.target.value)}
+                                className="mt-1 rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1 text-sm text-zinc-100 focus:border-red-500 focus:outline-none"
+                            />
+                        </label>
+                        <div className="ml-auto flex gap-2">
+                            <button
+                                type="button"
+                                disabled={busy}
+                                onClick={onCancelReschedule}
+                                className="rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs font-bold uppercase tracking-[0.18em] text-zinc-300 transition hover:border-zinc-500 hover:text-white disabled:opacity-50"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                disabled={busy || !rescheduleDate || !rescheduleTime}
+                                onClick={onSubmitReschedule}
+                                className="rounded-xl border border-red-500/40 bg-red-600/15 px-3 py-2 text-xs font-bold uppercase tracking-[0.18em] text-red-100 transition hover:border-red-300 hover:bg-red-500/25 disabled:opacity-50"
+                            >
+                                Save
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </li>
     );
 }
