@@ -2,8 +2,10 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
-import type { AppointmentRow, CallbackRequestRow, LoanerRequestRow, UpsellRow } from '@/lib/supabase';
+import type { AppointmentRow, CallbackRequestRow, LoanerRequestRow } from '@/lib/supabase';
+import type { UpsellWithCustomerContext } from '@/lib/upsell-context';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
+import { UpsellCustomerContextBar } from '@/components/UpsellCustomerContextBar';
 
 const CALLBACK_SENTIMENT_STYLES: Record<string, string> = {
     positive: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200',
@@ -19,12 +21,19 @@ const CALLBACK_STATUS_STYLES: Record<string, string> = {
     cancelled: 'border-zinc-700 bg-zinc-950 text-zinc-300',
 };
 
+const UPSELL_STATUS_STYLES: Record<string, string> = {
+    pending: 'border-amber-500/40 bg-amber-500/10 text-amber-200',
+    accepted: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200',
+    declined: 'border-zinc-700 bg-zinc-950 text-zinc-300',
+    expired: 'border-red-500/40 bg-red-500/10 text-red-200',
+};
+
 interface SummaryResponse {
     persistence: 'supabase' | 'none';
     today: string;
     arrivals: AppointmentRow[];
     loaner_queue: LoanerRequestRow[];
-    upsells: UpsellRow[];
+    upsells: UpsellWithCustomerContext[];
     stats: {
         arrivals_count: number;
         loaner_pending: number;
@@ -386,12 +395,18 @@ export default function ServiceDeskPage() {
                                         <div className="min-w-0">
                                             <p className="text-sm font-black text-white">{u.upsell_type}</p>
                                             <p className="text-[10px] uppercase tracking-[0.22em] text-zinc-500 mt-1">
-                                                Customer {u.customer_id} · Vehicle {u.vehicle_id}
+                                                Created {formatRelative(u.created_at)}
                                             </p>
                                             {u.description && <p className="mt-2 text-xs text-zinc-300">{u.description}</p>}
                                         </div>
-                                        <p className="text-lg font-black text-emerald-300">{formatCurrency(u.value_est)}</p>
+                                        <div className="flex shrink-0 flex-col items-end gap-2">
+                                            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] ${UPSELL_STATUS_STYLES[u.status] ?? UPSELL_STATUS_STYLES.pending}`}>
+                                                {u.status}
+                                            </span>
+                                            <p className="text-lg font-black text-emerald-300">{formatCurrency(u.value_est)}</p>
+                                        </div>
                                     </div>
+                                    <UpsellCustomerContextBar upsell={u} />
                                     <div className="mt-3 flex gap-2">
                                         <button
                                             type="button"
@@ -399,7 +414,7 @@ export default function ServiceDeskPage() {
                                             onClick={() => void patchUpsell(u.id, 'accepted')}
                                             className="flex-1 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.18em] text-emerald-200 transition hover:border-emerald-400 hover:bg-emerald-500/20 disabled:opacity-50"
                                         >
-                                            Accepted
+                                            Accept
                                         </button>
                                         <button
                                             type="button"
@@ -407,7 +422,7 @@ export default function ServiceDeskPage() {
                                             onClick={() => void patchUpsell(u.id, 'declined')}
                                             className="flex-1 rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs font-bold uppercase tracking-[0.18em] text-zinc-300 transition hover:border-zinc-500 hover:text-white disabled:opacity-50"
                                         >
-                                            Declined
+                                            Decline
                                         </button>
                                     </div>
                                 </li>

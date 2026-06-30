@@ -3,6 +3,8 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
+import { UpsellCustomerContextBar } from '@/components/UpsellCustomerContextBar';
+import type { UpsellWithCustomerContext } from '@/lib/upsell-context';
 
 // /group — Fixed Operations Manager (group_manager) dashboard.
 //
@@ -42,9 +44,36 @@ interface GroupSummary {
         open_repair_orders: number;
         loaners_active: number;
         warranty_alerts: number;
+        pending_upsells: number;
+        upsell_value: number;
     };
     top_callback_reasons: Array<{ reason: string; count: number }>;
+    upsells: UpsellWithCustomerContext[];
     persistence: 'supabase' | 'mock';
+}
+
+const UPSELL_STATUS_STYLES: Record<string, string> = {
+    pending: 'border-amber-500/40 bg-amber-500/10 text-amber-200',
+    accepted: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200',
+    declined: 'border-zinc-700 bg-zinc-950 text-zinc-300',
+    expired: 'border-red-500/40 bg-red-500/10 text-red-200',
+};
+
+function formatCurrency(value: number | null | undefined) {
+    if (value === null || value === undefined) return '—';
+    return new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD', maximumFractionDigits: 0 }).format(value);
+}
+
+function formatRelative(iso: string) {
+    try {
+        const diff = (Date.now() - new Date(iso).getTime()) / 1000;
+        if (diff < 60) return 'just now';
+        if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+        if (diff < 86_400) return `${Math.floor(diff / 3600)}h ago`;
+        return new Date(iso).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' });
+    } catch {
+        return iso;
+    }
 }
 
 function sentimentColor(score: number | null): string {
@@ -129,6 +158,8 @@ export default function GroupDashboard() {
                             <StatCard label="Open ROs" value={String(data.totals.open_repair_orders)} />
                             <StatCard label="Active loaners" value={String(data.totals.loaners_active)} />
                             <StatCard label="Warranty alerts" value={String(data.totals.warranty_alerts)} accent={data.totals.warranty_alerts > 0 ? 'amber' : undefined} />
+                            <StatCard label="Pending upsells" value={String(data.totals.pending_upsells)} accent={data.totals.pending_upsells > 0 ? 'amber' : undefined} />
+                            <StatCard label="Upsell pipeline" value={formatCurrency(data.totals.upsell_value)} accent="emerald" />
                             <StatCard label="Persistence" value={data.persistence === 'supabase' ? 'Supabase' : 'Demo data'} accent={data.persistence === 'supabase' ? 'emerald' : 'sky'} />
                         </div>
 
@@ -164,6 +195,42 @@ export default function GroupDashboard() {
                                 </article>
                             ))}
                         </div>
+
+                        {data.upsells.length > 0 && (
+                            <section className="mb-6 rounded-3xl border border-zinc-800 bg-zinc-900 p-5">
+                                <header className="mb-4 flex items-end justify-between gap-3">
+                                    <div>
+                                        <p className="text-xs font-semibold uppercase tracking-[0.28em] text-zinc-500">Upsell pipeline</p>
+                                        <h3 className="mt-2 text-xl font-black text-white">Aria-flagged opportunities</h3>
+                                    </div>
+                                    <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-bold uppercase tracking-[0.18em] text-emerald-200">
+                                        {formatCurrency(data.totals.upsell_value)} potential
+                                    </span>
+                                </header>
+                                <ul className="grid gap-3 lg:grid-cols-2">
+                                    {data.upsells.map((u) => (
+                                        <li key={u.id} className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                                            <div className="flex items-start justify-between gap-3">
+                                                <div className="min-w-0">
+                                                    <p className="text-sm font-black text-white">{u.upsell_type}</p>
+                                                    <p className="mt-1 text-[10px] uppercase tracking-[0.22em] text-zinc-500">
+                                                        Created {formatRelative(u.created_at)}
+                                                    </p>
+                                                    {u.description && <p className="mt-2 text-xs leading-5 text-zinc-300">{u.description}</p>}
+                                                </div>
+                                                <div className="flex shrink-0 flex-col items-end gap-2">
+                                                    <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] ${UPSELL_STATUS_STYLES[u.status] ?? UPSELL_STATUS_STYLES.pending}`}>
+                                                        {u.status}
+                                                    </span>
+                                                    <p className="text-lg font-black text-emerald-300">{formatCurrency(u.value_est)}</p>
+                                                </div>
+                                            </div>
+                                            <UpsellCustomerContextBar upsell={u} />
+                                        </li>
+                                    ))}
+                                </ul>
+                            </section>
+                        )}
 
                         <div className="grid gap-3 lg:grid-cols-2">
                             <section className="rounded-3xl border border-zinc-800 bg-zinc-900 p-5">

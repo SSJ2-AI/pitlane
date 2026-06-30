@@ -2,11 +2,32 @@
 import { NextResponse } from 'next/server';
 import { getSupabase, type AppointmentRow, type LoanerRequestRow, type UpsellRow } from '@/lib/supabase';
 import { resolveDealerForRequest } from '@/lib/dealer';
+import { MOCK_CUSTOMERS } from '@/lib/mock-customers';
+import { MOCK_VEHICLES } from '@/lib/mock-vehicles';
+import { enrichUpsellsWithCustomerContext, type UpsellWithCustomerContext } from '@/lib/upsell-context';
 
 export const dynamic = 'force-dynamic';
 
 function todayIso(): string {
     return new Date().toISOString().slice(0, 10);
+}
+
+function mockVehicleSummary(vehicleId: string, customerId: string): string | null {
+    const vehicle = MOCK_VEHICLES.find((v) => v.id === vehicleId) ?? MOCK_VEHICLES.find((v) => v.customer_id === customerId);
+    if (!vehicle) return null;
+    return [vehicle.year, vehicle.make, vehicle.model, vehicle.trim].filter(Boolean).join(' ');
+}
+
+function withMockCustomerContext(upsells: UpsellRow[]): UpsellWithCustomerContext[] {
+    return upsells.map((u) => {
+        const customer = MOCK_CUSTOMERS.find((c) => c.id === u.customer_id);
+        return {
+            ...u,
+            customer_phone: customer?.phone ?? null,
+            customer_tier: customer?.loyaltyTier ?? null,
+            vehicle_summary: mockVehicleSummary(u.vehicle_id, u.customer_id),
+        };
+    });
 }
 
 function getMockSummary(today: string) {
@@ -23,8 +44,9 @@ function getMockSummary(today: string) {
         { id: 'ups_002', call_log_id: 'call_002', customer_id: 'cust_002', dealer_id: 'dealer_porsche_toronto', vehicle_id: 'veh_002a', upsell_type: 'cabin_air_filter', description: 'Cabin Air Filter Replacement', value_est: 240, status: 'pending', created_at: new Date(Date.now() - 86400000).toISOString() },
         { id: 'ups_003', call_log_id: 'call_004', customer_id: 'cust_004', dealer_id: 'dealer_porsche_toronto', vehicle_id: 'veh_004a', upsell_type: 'software_update', description: 'Annual Taycan Software Update Package', value_est: 420, status: 'pending', created_at: new Date(Date.now() - 86400000 * 2).toISOString() },
     ];
-    const upsellValue = upsells.reduce((s, u) => s + (u.value_est ?? 0), 0);
-    return { persistence: 'supabase' as const, today, arrivals, loaner_queue, upsells, stats: { arrivals_count: arrivals.length, loaner_pending: loaner_queue.length, upsell_count: upsells.length, upsell_value: upsellValue } };
+    const enrichedUpsells = withMockCustomerContext(upsells);
+    const upsellValue = enrichedUpsells.reduce((s, u) => s + (u.value_est ?? 0), 0);
+    return { persistence: 'supabase' as const, today, arrivals, loaner_queue, upsells: enrichedUpsells, stats: { arrivals_count: arrivals.length, loaner_pending: loaner_queue.length, upsell_count: enrichedUpsells.length, upsell_value: upsellValue } };
 }
 
 export async function GET(request: Request) {
@@ -47,7 +69,11 @@ export async function GET(request: Request) {
     if (upsellsRes.error) console.error('[/api/service-desk/summary] upsells:', upsellsRes.error.message);
     const arrivals = (arrivalsRes.data ?? []) as AppointmentRow[];
     const loaners = (loanersRes.data ?? []) as LoanerRequestRow[];
-    const upsells = (upsellsRes.data ?? []) as UpsellRow[];
+    const upsells = await enrichUpsellsWithCustomerContext(
+        supabase,
+        (upsellsRes.data ?? []) as UpsellRow[],
+        '[/api/service-desk/summary]',
+    );
     const upsellValue = upsells.reduce((sum, u) => sum + (u.value_est ?? 0), 0);
     return NextResponse.json({ persistence: 'supabase' as const, today, arrivals, loaner_queue: loaners, upsells, stats: { arrivals_count: arrivals.length, loaner_pending: loaners.length, upsell_count: upsells.length, upsell_value: upsellValue } });
 }

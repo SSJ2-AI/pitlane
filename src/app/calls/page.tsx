@@ -9,9 +9,10 @@ import type {
     CallOutcome,
     CallSentiment,
     LoanerRequestRow,
-    UpsellRow,
 } from '@/lib/supabase';
+import type { UpsellWithCustomerContext } from '@/lib/upsell-context';
 import { VoiceStatusDot } from '@/components/VoiceStatusDot';
+import { UpsellCustomerContextBar } from '@/components/UpsellCustomerContextBar';
 
 const OUTCOMES: { value: CallOutcome | ''; label: string }[] = [
     { value: '', label: 'All outcomes' },
@@ -43,6 +44,13 @@ const STATUS_STYLES: Record<string, string> = {
     no_answer: 'border-zinc-700 bg-zinc-950 text-zinc-300',
 };
 
+const UPSELL_STATUS_STYLES: Record<string, string> = {
+    pending: 'border-amber-500/40 bg-amber-500/10 text-amber-200',
+    accepted: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200',
+    declined: 'border-zinc-700 bg-zinc-950 text-zinc-300',
+    expired: 'border-red-500/40 bg-red-500/10 text-red-200',
+};
+
 const DEFAULT_LIMIT = 50;
 
 type CallRowWithName = CallLogRow & { customer_name?: string | null };
@@ -56,7 +64,7 @@ interface CallListResponse {
 interface CallDetailResponse {
     call: CallLogRow;
     appointments: AppointmentRow[];
-    upsells: UpsellRow[];
+    upsells: UpsellWithCustomerContext[];
     loaner_requests: LoanerRequestRow[];
     persistence: 'supabase';
 }
@@ -726,8 +734,14 @@ function CallDetailPanel({
                                     <span className="font-black text-amber-200">{formatCurrency(u.value_est)}</span>
                                 </div>
                                 {u.description && <p className="mt-1 text-xs text-zinc-400">{u.description}</p>}
-                                <div className="mt-1 flex items-center justify-between gap-2">
-                                    <p className="text-[10px] uppercase tracking-[0.22em] text-zinc-500">{u.status}</p>
+                                <UpsellCustomerContextBar upsell={u} />
+                                <div className="mt-2 flex items-center justify-between gap-2">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] ${UPSELL_STATUS_STYLES[u.status] ?? UPSELL_STATUS_STYLES.pending}`}>
+                                            {u.status}
+                                        </span>
+                                        <span className="text-[10px] uppercase tracking-[0.22em] text-zinc-500">{formatTime(u.created_at)}</span>
+                                    </div>
                                     {u.vehicle_id && (
                                         <Link
                                             href={`/vehicles/${encodeURIComponent(u.vehicle_id)}`}

@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server';
 import { getSupabase, type CallLogRow, type AppointmentRow, type UpsellRow, type LoanerRequestRow } from '@/lib/supabase';
 import { resolveDealerForRequest } from '@/lib/dealer';
+import { MOCK_CUSTOMERS } from '@/lib/mock-customers';
+import { MOCK_VEHICLES } from '@/lib/mock-vehicles';
+import { enrichUpsellsWithCustomerContext } from '@/lib/upsell-context';
 
 // GET /api/calls/:id
 //
@@ -16,6 +19,14 @@ interface RouteContext {
     params: { id: string };
 }
 
+function mockVehicleSummary(vehicleId: string | null | undefined, customerId: string | null | undefined): string | null {
+    const vehicle =
+        (vehicleId ? MOCK_VEHICLES.find((v) => v.id === vehicleId) : null) ??
+        (customerId ? MOCK_VEHICLES.find((v) => v.customer_id === customerId) : null);
+    if (!vehicle) return null;
+    return [vehicle.year, vehicle.make, vehicle.model, vehicle.trim].filter(Boolean).join(' ');
+}
+
 export async function GET(request: Request, context: RouteContext) {
     const id = context.params.id;
     if (!id) {
@@ -29,15 +40,22 @@ export async function GET(request: Request, context: RouteContext) {
         if (!call) {
             return NextResponse.json({ error: 'Call not found' }, { status: 404 });
         }
+        const customer = MOCK_CUSTOMERS.find((c) => c.id === call.customer_id);
+        const mockVehicle = call.customer_id ? MOCK_VEHICLES.find((v) => v.customer_id === call.customer_id) : null;
         const upsells = ((call.summary?.upsells_flagged ?? []) as any[]).map((u: any, i: number) => ({
             id: `mock-upsell-${id}-${i}`,
             call_log_id: id,
             customer_id: call.customer_id ?? null,
             dealer_id: 'aaaaaaaa-0000-0000-0000-000000000001',
+            vehicle_id: mockVehicle?.id ?? '',
             upsell_type: u.type ?? '',
             description: u.description ?? '',
             value_est: u.value_est ?? null,
+            status: 'pending',
             created_at: call.started_at ?? new Date().toISOString(),
+            customer_phone: customer?.phone ?? null,
+            customer_tier: customer?.loyaltyTier ?? null,
+            vehicle_summary: mockVehicleSummary(mockVehicle?.id, call.customer_id),
         }));
         const loaner_requests = call.summary?.loaner_needed ? [{
             id: `mock-loaner-${id}`,
@@ -87,7 +105,11 @@ export async function GET(request: Request, context: RouteContext) {
     return NextResponse.json({
         call: callResult.data as CallLogRow,
         appointments: (apptResult.data ?? []) as AppointmentRow[],
-        upsells: (upsellResult.data ?? []) as UpsellRow[],
+        upsells: await enrichUpsellsWithCustomerContext(
+            supabase,
+            (upsellResult.data ?? []) as UpsellRow[],
+            '[/api/calls/:id]',
+        ),
         loaner_requests: (loanerResult.data ?? []) as LoanerRequestRow[],
         dealer: { id: dealer.id, name: dealer.name },
         persistence: 'supabase' as const,

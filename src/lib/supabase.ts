@@ -108,6 +108,9 @@ export interface AppointmentRow {
     customer_id: string;
     dealer_id: string | null;
     vehicle_id: string;
+    vehicle_year?: number | null;
+    vehicle_make?: string | null;
+    vehicle_model?: string | null;
     date: string;
     time: string;
     service_type: string;
@@ -212,6 +215,7 @@ export interface CustomerRow {
     id: string;
     dealer_id: string | null;
     phone: string;
+    tier?: string | null;
     cdk_customer_id: string | null;
     is_new_customer: boolean;
     total_calls: number;

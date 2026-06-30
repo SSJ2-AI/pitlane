@@ -1,9 +1,11 @@
 // @ts-nocheck
 import { NextResponse } from 'next/server';
-import { getSupabase } from '@/lib/supabase';
+import { getSupabase, type UpsellRow } from '@/lib/supabase';
 import { canViewGroupConsole, readSessionFromRequest } from '@/lib/role';
 import { getVehicleWarrantyInfo, MOCK_VEHICLES } from '@/lib/mock-vehicles';
+import { MOCK_CUSTOMERS } from '@/lib/mock-customers';
 import { recordAudit } from '@/lib/audit';
+import { enrichUpsellsWithCustomerContext, type UpsellWithCustomerContext } from '@/lib/upsell-context';
 
 // GET /api/group/summary
 //
@@ -40,8 +42,11 @@ interface GroupSummary {
         open_repair_orders: number;
         loaners_active: number;
         warranty_alerts: number;
+        pending_upsells: number;
+        upsell_value: number;
     };
     top_callback_reasons: Array<{ reason: string; count: number }>;
+    upsells: UpsellWithCustomerContext[];
     persistence: 'supabase' | 'mock';
 }
 
@@ -55,6 +60,24 @@ function weekAgoIso(): string {
     const d = new Date();
     d.setDate(d.getDate() - 7);
     return d.toISOString();
+}
+
+function mockVehicleSummary(vehicleId: string, customerId: string): string | null {
+    const vehicle = MOCK_VEHICLES.find((v) => v.id === vehicleId) ?? MOCK_VEHICLES.find((v) => v.customer_id === customerId);
+    if (!vehicle) return null;
+    return [vehicle.year, vehicle.make, vehicle.model, vehicle.trim].filter(Boolean).join(' ');
+}
+
+function withMockCustomerContext(upsells: UpsellRow[]): UpsellWithCustomerContext[] {
+    return upsells.map((u) => {
+        const customer = MOCK_CUSTOMERS.find((c) => c.id === u.customer_id);
+        return {
+            ...u,
+            customer_phone: customer?.phone ?? null,
+            customer_tier: customer?.loyaltyTier ?? null,
+            vehicle_summary: mockVehicleSummary(u.vehicle_id, u.customer_id),
+        };
+    });
 }
 
 function getMockSummary(): GroupSummary {
@@ -115,6 +138,45 @@ function getMockSummary(): GroupSummary {
         },
     ];
 
+    const upsells = withMockCustomerContext([
+        {
+            id: 'ups_group_001',
+            call_log_id: 'call_001',
+            customer_id: 'cust_001',
+            dealer_id: 'aaaaaaaa-0000-0000-0000-000000000001',
+            vehicle_id: 'veh_001a',
+            upsell_type: 'brake_replacement',
+            description: 'Rear Brake Replacement - previously declined Nov 2025',
+            value_est: 875,
+            status: 'pending',
+            created_at: new Date(Date.now() - 86400000 * 3).toISOString(),
+        },
+        {
+            id: 'ups_group_002',
+            call_log_id: 'call_002',
+            customer_id: 'cust_002',
+            dealer_id: 'aaaaaaaa-0000-0000-0000-000000000001',
+            vehicle_id: 'veh_002a',
+            upsell_type: 'cabin_air_filter',
+            description: 'Cabin Air Filter Replacement',
+            value_est: 240,
+            status: 'pending',
+            created_at: new Date(Date.now() - 86400000).toISOString(),
+        },
+        {
+            id: 'ups_group_003',
+            call_log_id: 'call_005',
+            customer_id: 'cust_005',
+            dealer_id: 'aaaaaaaa-0000-0000-0000-000000000001',
+            vehicle_id: 'veh_005a',
+            upsell_type: 'track_inspection',
+            description: 'Pre-track brake and tire inspection package',
+            value_est: 520,
+            status: 'pending',
+            created_at: new Date(Date.now() - 86400000 * 2).toISOString(),
+        },
+    ]);
+
     const totals = dealers.reduce(
         (acc, d) => ({
             dealers_count: acc.dealers_count + 1,
@@ -124,8 +186,10 @@ function getMockSummary(): GroupSummary {
             open_repair_orders: acc.open_repair_orders + d.open_repair_orders,
             loaners_active: acc.loaners_active + d.loaners_active,
             warranty_alerts: acc.warranty_alerts + d.warranty_expiring_soon + d.warranty_expired,
+            pending_upsells: acc.pending_upsells,
+            upsell_value: acc.upsell_value,
         }),
-        { dealers_count: 0, calls_today: 0, calls_this_week: 0, callbacks_pending: 0, open_repair_orders: 0, loaners_active: 0, warranty_alerts: 0 },
+        { dealers_count: 0, calls_today: 0, calls_this_week: 0, callbacks_pending: 0, open_repair_orders: 0, loaners_active: 0, warranty_alerts: 0, pending_upsells: upsells.length, upsell_value: upsells.reduce((sum, u) => sum + (u.value_est ?? 0), 0) },
     );
 
     return {
@@ -137,6 +201,7 @@ function getMockSummary(): GroupSummary {
             { reason: 'Loaner confirmation', count: 2 },
             { reason: 'Recall question', count: 2 },
         ],
+        upsells,
         persistence: 'mock',
     };
 }
@@ -205,6 +270,22 @@ export async function GET(request: Request) {
             };
         }));
 
+        const upsellsResult = await supabase
+            .from('upsells')
+            .select('*')
+            .in('dealer_id', dealers.map((d) => d.id))
+            .eq('status', 'pending')
+            .order('value_est', { ascending: false, nullsFirst: false })
+            .limit(10);
+        if (upsellsResult.error) {
+            console.error('[/api/group/summary] upsells select failed:', upsellsResult.error.message);
+        }
+        const upsells = await enrichUpsellsWithCustomerContext(
+            supabase,
+            (upsellsResult.data ?? []) as UpsellRow[],
+            '[/api/group/summary]',
+        );
+
         const totals = perDealer.reduce(
             (acc, d) => ({
                 dealers_count: acc.dealers_count + 1,
@@ -214,8 +295,10 @@ export async function GET(request: Request) {
                 open_repair_orders: acc.open_repair_orders + d.open_repair_orders,
                 loaners_active: acc.loaners_active + d.loaners_active,
                 warranty_alerts: acc.warranty_alerts + d.warranty_expiring_soon + d.warranty_expired,
+                pending_upsells: acc.pending_upsells,
+                upsell_value: acc.upsell_value,
             }),
-            { dealers_count: 0, calls_today: 0, calls_this_week: 0, callbacks_pending: 0, open_repair_orders: 0, loaners_active: 0, warranty_alerts: 0 },
+            { dealers_count: 0, calls_today: 0, calls_this_week: 0, callbacks_pending: 0, open_repair_orders: 0, loaners_active: 0, warranty_alerts: 0, pending_upsells: upsells.length, upsell_value: upsells.reduce((sum, u) => sum + (u.value_est ?? 0), 0) },
         );
 
         // Top callback reasons across the group.
@@ -235,7 +318,7 @@ export async function GET(request: Request) {
             .slice(0, 5)
             .map(([reason, count]) => ({ reason, count }));
 
-        return NextResponse.json({ dealers: perDealer, totals, top_callback_reasons, persistence: 'supabase' });
+        return NextResponse.json({ dealers: perDealer, totals, top_callback_reasons, upsells, persistence: 'supabase' });
     } catch (err) {
         console.error('[/api/group/summary] aggregation threw:', err instanceof Error ? err.message : err);
         return NextResponse.json(getMockSummary());
