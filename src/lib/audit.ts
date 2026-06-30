@@ -35,7 +35,7 @@ export type AuditAction =
     | 'update_loaner_vehicle'
     | 'delete_loaner_vehicle'
     | 'loaner_request_created'
-    // Phase 15 — service-desk appointment actions
+    // Phase 15 — service-desk appointment lifecycle actions
     | 'update_appointment_status'
     | 'reschedule_appointment';
 

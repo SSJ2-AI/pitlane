@@ -110,10 +110,12 @@ export interface AppointmentRow {
     vehicle_id: string;
     date: string;
     time: string;
+    scheduled_date?: string | null;
+    scheduled_time?: string | null;
     service_type: string;
     advisor: string | null;
     duration_est_hours: number | null;
-    status: 'confirmed' | 'checked_in' | 'in_progress' | 'completed' | 'cancelled';
+    status: string;
     checked_in_at?: string | null;
     completed_at?: string | null;
     rescheduled_from?: string | null;
@@ -121,6 +123,7 @@ export interface AppointmentRow {
     cdk_id: string | null;
     call_log_id: string | null;
     created_at: string;
+    updated_at?: string;
 }
 
 export interface UpsellRow {

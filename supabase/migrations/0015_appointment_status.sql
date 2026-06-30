@@ -1,66 +1,54 @@
 -- ─── PitLane Phase 15: appointment status management ───────────────────────
 --
--- Service advisors can now action appointments from the service desk. This
--- migration tightens the appointment lifecycle, adds operational timestamps,
--- records reschedule lineage, and logs status transitions to audit_log.
+-- Service advisors can now action appointments directly from /service-desk:
+-- checked-in, in-progress, completed, cancelled, and same-day reschedule.
 --
--- Existing early demo rows used status='scheduled'. Phase 15 replaces that
--- with the explicit 'confirmed' starting state before installing the new
--- CHECK constraint.
+-- This migration:
+--   1) extends public.appointments with status lifecycle metadata
+--   2) tightens the status CHECK constraint
+--   3) enables RLS + adds advisor/manager update policy (same dealer)
+--   4) adds an audit trigger for status transitions
 
-alter table public.appointments
-  add column if not exists checked_in_at     timestamptz,
-  add column if not exists completed_at      timestamptz,
-  add column if not exists rescheduled_from  uuid references public.appointments(id) on delete set null;
+-- ─── appointments columns ───────────────────────────────────────────────────
 
+-- Existing datasets may still carry "scheduled". Normalize before tightening
+-- the CHECK constraint so the migration is re-runnable and non-breaking.
 update public.appointments
 set status = 'confirmed'
 where status = 'scheduled';
 
-update public.appointments
-set status = 'confirmed'
-where status not in ('confirmed', 'checked_in', 'in_progress', 'completed', 'cancelled');
+alter table public.appointments
+  add column if not exists checked_in_at timestamptz;
 
 alter table public.appointments
-  alter column status set default 'confirmed',
-  alter column status set not null;
+  add column if not exists completed_at timestamptz;
 
-do $$
-declare
-  c record;
-begin
-  for c in
-    select conname
-    from pg_constraint
-    where conrelid = 'public.appointments'::regclass
-      and contype = 'c'
-      and pg_get_constraintdef(oid) ilike '%status%'
-  loop
-    execute format('alter table public.appointments drop constraint if exists %I', c.conname);
-  end loop;
-end;
-$$;
+alter table public.appointments
+  add column if not exists rescheduled_from uuid references public.appointments(id) on delete set null;
+
+-- Replace the legacy status constraint from 0001.
+alter table public.appointments
+  drop constraint if exists appointments_status_check;
 
 alter table public.appointments
   add constraint appointments_status_check
   check (status in ('confirmed', 'checked_in', 'in_progress', 'completed', 'cancelled'));
 
+alter table public.appointments
+  alter column status set default 'confirmed';
+
+alter table public.appointments
+  alter column status set not null;
+
 create index if not exists appointments_rescheduled_from_idx
-  on public.appointments (rescheduled_from)
-  where rescheduled_from is not null;
+  on public.appointments (rescheduled_from);
 
-create index if not exists appointments_dealer_date_status_idx
-  on public.appointments (dealer_id, date, status);
-
--- ─── Row-Level Security ────────────────────────────────────────────────────
---
--- Dashboard API routes use the service-role key and enforce this same gate in
--- TypeScript. This RLS policy is defense-in-depth for future per-user callers.
+-- ─── Row-Level Security ─────────────────────────────────────────────────────
 
 alter table public.appointments enable row level security;
 
-drop policy if exists appointments_service_desk_update on public.appointments;
-create policy appointments_service_desk_update on public.appointments
+drop policy if exists appointment_status_update on public.appointments;
+create policy appointment_status_update on public.appointments
   for update
   using (
     exists (
@@ -81,30 +69,27 @@ create policy appointments_service_desk_update on public.appointments
     )
   );
 
--- ─── Audit trigger ─────────────────────────────────────────────────────────
---
--- Application routes also call recordAudit() with the staff session so
--- service-role writes carry attribution. This trigger captures database-level
--- status transitions even when auth.uid() is unavailable.
+-- ─── Audit trigger: appointment status transitions ─────────────────────────
 
-create or replace function public.audit_appointment_status_transition()
+create or replace function public.audit_appointment_status_change()
 returns trigger
 language plpgsql
 security definer
 set search_path = public
 as $$
 begin
-  insert into public.audit_log (
-    staff_id, dealer_id, action, resource_type, resource_id, ip_address
-  ) values (
-    auth.uid(),
-    new.dealer_id,
-    'appointment_status_' || old.status || '_to_' || new.status,
-    'appointment',
-    new.id::text,
-    null
-  );
-
+  if old.status is distinct from new.status then
+    insert into public.audit_log (
+      staff_id, dealer_id, action, resource_type, resource_id, ip_address
+    ) values (
+      auth.uid(),
+      new.dealer_id,
+      'update_appointment_status',
+      'appointment_status_transition',
+      new.id::text || ':' || old.status || '->' || new.status,
+      null
+    );
+  end if;
   return new;
 end;
 $$;
@@ -112,6 +97,4 @@ $$;
 drop trigger if exists appointments_status_audit on public.appointments;
 create trigger appointments_status_audit
   after update of status on public.appointments
-  for each row
-  when (old.status is distinct from new.status)
-  execute function public.audit_appointment_status_transition();
+  for each row execute function public.audit_appointment_status_change();

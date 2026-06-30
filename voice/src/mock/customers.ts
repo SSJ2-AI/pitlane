@@ -107,7 +107,7 @@ export const MOCK_CUSTOMERS: Customer[] = [
         time: '08:30',
         serviceType: 'Taycan Annual Inspection + Software Update',
         advisorName: 'Sarah Kowalski',
-        status: 'scheduled',
+        status: 'confirmed',
       },
     ],
     openRecalls: [
