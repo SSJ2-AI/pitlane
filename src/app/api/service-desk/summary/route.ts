@@ -18,7 +18,7 @@ function getMockSummary(today: string) {
     const arrivals: AppointmentRow[] = [
         { id: 'appt_001', customer_id: 'cust_001', dealer_id: 'dealer_porsche_toronto', vehicle_id: 'veh_001a', date: today, time: '09:00', service_type: 'Annual Service B + Recall 24V-271', advisor: 'Marco Alvarez', duration_est_hours: 2.5, status: 'confirmed', confirmation_number: 'PCA-001', cdk_id: null, call_log_id: 'call_001', created_at: new Date().toISOString() },
         { id: 'appt_002', customer_id: 'cust_002', dealer_id: 'dealer_porsche_toronto', vehicle_id: 'veh_002a', date: today, time: '10:30', service_type: 'Oil Change + Tire Rotation', advisor: 'Nina Patel', duration_est_hours: 1.5, status: 'confirmed', confirmation_number: 'PCA-002', cdk_id: null, call_log_id: 'call_002', created_at: new Date().toISOString() },
-        { id: 'appt_003', customer_id: 'cust_003', dealer_id: 'dealer_porsche_toronto', vehicle_id: 'veh_003a', date: today, time: '14:00', service_type: 'Brake Fluid + 60K Service', advisor: 'Marco Alvarez', duration_est_hours: 4.0, status: 'scheduled', confirmation_number: 'PCA-003', cdk_id: null, call_log_id: 'call_003', created_at: new Date().toISOString() },
+        { id: 'appt_003', customer_id: 'cust_003', dealer_id: 'dealer_porsche_toronto', vehicle_id: 'veh_003a', date: today, time: '14:00', service_type: 'Brake Fluid + 60K Service', advisor: 'Marco Alvarez', duration_est_hours: 4.0, status: 'confirmed', confirmation_number: 'PCA-003', cdk_id: null, call_log_id: 'call_003', created_at: new Date().toISOString() },
     ];
     const loaner_queue: LoanerRequestRow[] = [
         { id: 'loan_001', call_log_id: 'call_003', appointment_id: 'appt_003', customer_id: 'cust_003', dealer_id: 'dealer_porsche_toronto', requested_date: today, loaner_preferred: 'SUV — Cayenne or Macan', status: 'pending', notes: 'Customer dropping off at 2 PM', resolved_by: null, resolved_at: null, created_at: new Date().toISOString() },
@@ -44,7 +44,7 @@ export async function GET(request: Request) {
     }
     const dealer = await resolveDealerForRequest(request);
     const [arrivalsRes, loanersRes, upsellsRes] = await Promise.all([
-        supabase.from('appointments').select('*').eq('dealer_id', dealer.id).eq('date', today).neq('status', 'cancelled').order('time', { ascending: true }),
+        supabase.from('appointments').select('*').eq('dealer_id', dealer.id).eq('date', today).order('time', { ascending: true }),
         supabase.from('loaner_requests').select('*').eq('dealer_id', dealer.id).eq('status', 'pending').order('created_at', { ascending: false }),
         supabase.from('upsells').select('*').eq('dealer_id', dealer.id).eq('status', 'pending').order('value_est', { ascending: false, nullsFirst: false }),
     ]);

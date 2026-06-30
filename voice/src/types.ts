@@ -31,7 +31,7 @@ export interface Appointment {
   time: string
   serviceType: string
   advisorName: string
-  status: 'scheduled' | 'confirmed' | 'completed' | 'cancelled'
+  status: 'confirmed' | 'checked_in' | 'in_progress' | 'completed' | 'cancelled'
   notes?: string
 }
 

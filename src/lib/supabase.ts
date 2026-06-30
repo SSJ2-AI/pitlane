@@ -113,7 +113,10 @@ export interface AppointmentRow {
     service_type: string;
     advisor: string | null;
     duration_est_hours: number | null;
-    status: string;
+    status: 'confirmed' | 'checked_in' | 'in_progress' | 'completed' | 'cancelled';
+    checked_in_at?: string | null;
+    completed_at?: string | null;
+    rescheduled_from?: string | null;
     confirmation_number: string | null;
     cdk_id: string | null;
     call_log_id: string | null;

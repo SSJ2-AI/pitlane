@@ -182,7 +182,7 @@ export interface AppointmentInsert {
   advisor?: string | null
   duration_est_hours?: number | null
   confirmation_number: string
-  status?: 'confirmed' | 'scheduled' | 'cancelled' | 'completed'
+  status?: 'confirmed' | 'checked_in' | 'in_progress' | 'cancelled' | 'completed'
 }
 
 export async function insertAppointment(row: AppointmentInsert): Promise<string | null> {
