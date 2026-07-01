@@ -885,7 +885,7 @@ async function handleBookAppointment(input: BookAppointmentInput, res: Response)
     time,
     serviceType,
     advisorName: advisor,
-    status: 'scheduled',
+    status: 'confirmed',
   }
   customer.upcomingAppointments.push(newAppt)
 
