@@ -27,7 +27,7 @@ export type PostCallStatus = 'completed' | 'failed' | 'no_answer'
 export interface ProcessPostCallInput {
   callSid?: string | null
   conversationId?: string | null
-  callerPhone: string
+  callerPhone: string | null
   durationSeconds: number
   transcript: TranscriptTurn[]
   status: PostCallStatus
@@ -65,8 +65,18 @@ export function transcriptToText(transcript: TranscriptTurn[]): string {
   return transcript.map((t) => `[${t.role}] ${t.message}`).join('\n')
 }
 
+function normaliseOptionalId(input: string | null | undefined): string | null {
+  const trimmed = input?.trim()
+  if (!trimmed) return null
+  const lower = trimmed.toLowerCase()
+  if (lower === 'null' || lower === 'undefined') return null
+  return trimmed
+}
+
 export async function processPostCall(input: ProcessPostCallInput): Promise<ProcessPostCallResult> {
   const phone = (input.callerPhone ?? '').trim()
+  const callSid = normaliseOptionalId(input.callSid)
+  const conversationId = normaliseOptionalId(input.conversationId)
   const dealer = input.dealer ?? DEFAULT_DEALER
 
   let customer: Customer | null = null
@@ -100,9 +110,9 @@ export async function processPostCall(input: ProcessPostCallInput): Promise<Proc
       : summaryRaw
 
   const callLogId = await upsertCallLog({
-    call_sid: input.callSid ?? null,
-    conversation_id: input.conversationId ?? null,
-    caller_phone: phone || 'unknown',
+    call_sid: callSid,
+    conversation_id: conversationId,
+    caller_phone: phone || null,
     customer_id: customer?.id ?? null,
     dealer_id: dealer.id,
     direction: 'inbound',
@@ -133,11 +143,11 @@ export async function processPostCall(input: ProcessPostCallInput): Promise<Proc
   }
 
   const inMemoryCallId =
-    input.callSid && getCall(input.callSid)
-      ? input.callSid
-      : input.conversationId && getCall(input.conversationId)
-      ? input.conversationId
-      : input.callSid ?? input.conversationId ?? null
+    callSid && getCall(callSid)
+      ? callSid
+      : conversationId && getCall(conversationId)
+      ? conversationId
+      : callSid ?? conversationId ?? null
 
   const transcriptText = transcriptToText(input.transcript)
   if (inMemoryCallId) {

@@ -88,7 +88,7 @@ export interface TranscriptTurn {
 
 export interface CallLogRow {
     id: string;
-    caller_phone: string;
+    caller_phone: string | null;
     customer_id: string | null;
     dealer_id: string | null;
     call_sid: string | null;

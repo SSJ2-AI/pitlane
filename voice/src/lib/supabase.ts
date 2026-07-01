@@ -95,7 +95,7 @@ export function getSupabase(): SupabaseClient | null {
 // ─── Convenience helpers used by the webhook routes ──────────────────────────
 
 export interface CallLogUpsert {
-  caller_phone: string
+  caller_phone: string | null
   customer_id?: string | null
   dealer_id?: string | null
   call_sid?: string | null
@@ -727,12 +727,22 @@ export interface CustomerRow {
   updated_at: string
 }
 
-/** Normalise a caller phone string: strip non-digit chars except a leading '+'. */
+/**
+ * Normalise a caller phone string.
+ *
+ * Keep E.164-ish values stable, strip formatting whitespace/punctuation, and
+ * default bare 10-digit NANP numbers to +1 so customers/call_logs share one
+ * canonical key.
+ */
 export function normaliseCallerPhone(input: string | null | undefined): string {
   if (!input) return ''
   const trimmed = input.trim()
   if (trimmed.startsWith('+')) return `+${trimmed.slice(1).replace(/\D/g, '')}`
-  return trimmed.replace(/\D/g, '')
+  const digits = trimmed.replace(/\D/g, '')
+  if (digits.length >= 10) {
+    return digits.length === 10 ? `+1${digits}` : `+${digits}`
+  }
+  return digits
 }
 
 /**
@@ -1051,12 +1061,20 @@ export async function getOrCreateCallLogIdForConversation(
 ): Promise<string | null> {
   const client = getSupabase()
   if (!client) return null
+  const normalisedConversationId = conversationId.trim()
+  if (
+    !normalisedConversationId
+    || normalisedConversationId.toLowerCase() === 'null'
+    || normalisedConversationId.toLowerCase() === 'undefined'
+  ) {
+    return null
+  }
 
   try {
     const lookup = await client
       .from('call_logs')
       .select('id')
-      .eq('conversation_id', conversationId)
+      .eq('conversation_id', normalisedConversationId)
       .maybeSingle()
     if (lookup.data?.id) return lookup.data.id as string
 
@@ -1080,7 +1098,7 @@ export async function getOrCreateCallLogIdForConversation(
         const id = recent.data.id as string
         await client
           .from('call_logs')
-          .update({ conversation_id: conversationId })
+          .update({ conversation_id: normalisedConversationId })
           .eq('id', id)
         return id
       }
@@ -1089,8 +1107,8 @@ export async function getOrCreateCallLogIdForConversation(
     const inserted = await client
       .from('call_logs')
       .insert({
-        conversation_id: conversationId,
-        caller_phone: hints?.phone ?? 'unknown',
+        conversation_id: normalisedConversationId,
+        caller_phone: hints?.phone ?? null,
         customer_id: hints?.customerId ?? null,
         dealer_id: hints?.dealerId ?? null,
         direction: 'inbound',
