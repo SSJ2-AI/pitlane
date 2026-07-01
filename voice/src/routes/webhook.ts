@@ -444,6 +444,13 @@ interface PostCallDataShape {
       to_number?: string
       internal_number?: string
     }
+    caller_id?: string
+  }
+  conversation_initiation_metadata?: {
+    external_caller_id?: string
+  }
+  call_data?: {
+    phone_number?: string
   }
   conversation_initiation_client_data?: PostCallInitiationShape
   transcript?: PostCallTranscriptTurn[]
@@ -472,6 +479,35 @@ function normaliseTranscript(input: PostCallTranscriptTurn[] | undefined): Trans
     .filter((turn) => turn.message.length > 0)
 }
 
+function cleanWebhookValue(value: unknown): string | null {
+  if (value === null || value === undefined) return null
+  const text = String(value).trim()
+  if (!text) return null
+  if (['unknown', 'null', 'undefined'].includes(text.toLowerCase())) return null
+  return text
+}
+
+function normaliseWebhookPhone(value: unknown): string | null {
+  const text = cleanWebhookValue(value)
+  if (!text) return null
+
+  const compact = text.replace(/\s+/g, '')
+  if (compact.startsWith('+')) {
+    const digits = compact.slice(1).replace(/\D/g, '')
+    return digits ? `+${digits}` : null
+  }
+
+  const digits = compact.replace(/\D/g, '')
+  if (!digits) return null
+  if (digits.length >= 10) {
+    if (digits.length === 10) return `+1${digits}`
+    if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`
+    return `+${digits}`
+  }
+
+  return compact
+}
+
 router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Response> => {
   // Phase 8b spec: even if the HMAC check fails we LOG it loudly and still
   // process the payload so call data isn't silently dropped. Production
@@ -489,33 +525,38 @@ router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Re
   const envelope: PostCallDataShape =
     (body.data && typeof body.data === 'object') ? body.data : body
 
-  const conversationId =
+  const conversationId = cleanWebhookValue(
     envelope.conversation_id
-    ?? envelope.call_id
-    ?? body.conversation_id
-    ?? body.call_id
-    ?? null
-  const callSid = envelope.call_sid ?? body.call_sid ?? null
+      ?? envelope.call_id
+      ?? body.conversation_id
+      ?? body.call_id,
+  )
+  const callSid = cleanWebhookValue(envelope.call_sid ?? body.call_sid)
 
   // ElevenLabs caller-id resolution order (in priority):
-  //   1. explicit top-level `caller_phone` (legacy / test fixtures)
-  //   2. metadata.phone_call.external_number (Twilio inbound — production)
-  //   3. conversation_initiation_client_data.dynamic_variables.caller_id
-  //      (SIP trunks where Twilio ANI isn't surfaced; we populate this
-  //      ourselves in the pre-call webhook so it's always available when
-  //      the caller's phone was known at start-of-call)
+  //   1. body.data.metadata.phone_call.external_number
+  //   2. body.data.metadata.caller_id
+  //   3. body.data.conversation_initiation_metadata.external_caller_id
+  //   4. body.data.call_data.phone_number
+  // Then fallback to legacy payload locations so local fixtures remain valid.
   const dynamicCallerId =
     envelope.conversation_initiation_client_data?.dynamic_variables?.caller_id
     ?? body.conversation_initiation_client_data?.dynamic_variables?.caller_id
-  const callerPhone = (
-    envelope.caller_phone
-    ?? envelope.metadata?.phone_call?.external_number
-    ?? body.caller_phone
-    ?? body.metadata?.phone_call?.external_number
-    ?? (typeof dynamicCallerId === 'string' || typeof dynamicCallerId === 'number'
-        ? String(dynamicCallerId)
-        : '')
-  ).toString().trim()
+  const callerPhoneCandidates: unknown[] = [
+    body.data?.metadata?.phone_call?.external_number,
+    body.data?.metadata?.caller_id,
+    body.data?.conversation_initiation_metadata?.external_caller_id,
+    body.data?.call_data?.phone_number,
+    envelope.caller_phone,
+    envelope.metadata?.phone_call?.external_number,
+    body.caller_phone,
+    body.metadata?.phone_call?.external_number,
+    dynamicCallerId,
+  ]
+  const callerPhone =
+    callerPhoneCandidates
+      .map((candidate) => normaliseWebhookPhone(candidate))
+      .find((candidate): candidate is string => Boolean(candidate)) ?? null
   const duration =
     envelope.call_duration_secs
     ?? envelope.duration_secs
@@ -554,6 +595,12 @@ router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Re
   })
 
   const dealer = await getDealerByPhone(calledNumber)
+
+  if (!callerPhone) {
+    console.warn(
+      `[post-call] no caller phone in payload conv=${conversationId ?? 'n/a'} sid=${callSid ?? 'n/a'}`,
+    )
+  }
 
   console.log(
     `[Webhook] post-call conv=${conversationId ?? 'n/a'} sid=${callSid ?? 'n/a'} ` +

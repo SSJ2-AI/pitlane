@@ -95,7 +95,7 @@ export function getSupabase(): SupabaseClient | null {
 // ─── Convenience helpers used by the webhook routes ──────────────────────────
 
 export interface CallLogUpsert {
-  caller_phone: string
+  caller_phone: string | null
   customer_id?: string | null
   dealer_id?: string | null
   call_sid?: string | null

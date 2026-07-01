@@ -27,7 +27,7 @@ export type PostCallStatus = 'completed' | 'failed' | 'no_answer'
 export interface ProcessPostCallInput {
   callSid?: string | null
   conversationId?: string | null
-  callerPhone: string
+  callerPhone?: string | null
   durationSeconds: number
   transcript: TranscriptTurn[]
   status: PostCallStatus
@@ -102,7 +102,7 @@ export async function processPostCall(input: ProcessPostCallInput): Promise<Proc
   const callLogId = await upsertCallLog({
     call_sid: input.callSid ?? null,
     conversation_id: input.conversationId ?? null,
-    caller_phone: phone || 'unknown',
+    caller_phone: phone || null,
     customer_id: customer?.id ?? null,
     dealer_id: dealer.id,
     direction: 'inbound',
