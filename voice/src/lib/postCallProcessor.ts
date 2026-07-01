@@ -27,7 +27,10 @@ export type PostCallStatus = 'completed' | 'failed' | 'no_answer'
 export interface ProcessPostCallInput {
   callSid?: string | null
   conversationId?: string | null
-  callerPhone: string
+  /** Nullable: the post-call webhook may not carry a usable caller-id
+   *  (SIP without ANI, blocked/withheld number). We propagate the null
+   *  all the way to the DB rather than writing the string 'unknown'. */
+  callerPhone: string | null
   durationSeconds: number
   transcript: TranscriptTurn[]
   status: PostCallStatus
@@ -101,8 +104,16 @@ export async function processPostCall(input: ProcessPostCallInput): Promise<Proc
 
   const callLogId = await upsertCallLog({
     call_sid: input.callSid ?? null,
-    conversation_id: input.conversationId ?? null,
-    caller_phone: phone || 'unknown',
+    // Never persist the literal string 'null' if the ID is missing —
+    // pass through a real null. call_logs.conversation_id is nullable.
+    conversation_id:
+      typeof input.conversationId === 'string' && input.conversationId.trim().length > 0
+        ? input.conversationId.trim()
+        : null,
+    // Phase 15b: never write 'unknown' as caller_phone. When Aria/EL
+    // didn't surface a caller-id, leave the column NULL so downstream
+    // reporting can distinguish "unknown caller" from a real number.
+    caller_phone: phone || null,
     customer_id: customer?.id ?? null,
     dealer_id: dealer.id,
     direction: 'inbound',
