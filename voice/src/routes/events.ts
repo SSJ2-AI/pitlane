@@ -60,7 +60,10 @@ router.post('/call-completed', (req: Request, res: Response): void => {
     try {
       await processPostCall({
         conversationId: event.call_id,
-        callerPhone: phone === 'unknown' ? '' : phone,
+        // Phase 15b: pass a real null when the legacy event carried no
+        // caller-id so processPostCall can write NULL to call_logs
+        // instead of the string 'unknown'.
+        callerPhone: phone === 'unknown' ? null : phone,
         durationSeconds: event.duration_seconds,
         transcript,
         status,

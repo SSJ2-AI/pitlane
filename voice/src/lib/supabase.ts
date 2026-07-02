@@ -95,7 +95,12 @@ export function getSupabase(): SupabaseClient | null {
 // ─── Convenience helpers used by the webhook routes ──────────────────────────
 
 export interface CallLogUpsert {
-  caller_phone: string
+  /** Nullable: the ElevenLabs post-call webhook can arrive without a
+   *  usable caller-id (SIP without ANI, blocked number, mis-mapped
+   *  metadata). We NEVER write the string 'unknown' — a real null is
+   *  correct and matches the DB migration that dropped the NOT NULL
+   *  constraint on call_logs.caller_phone. */
+  caller_phone: string | null
   customer_id?: string | null
   dealer_id?: string | null
   call_sid?: string | null
@@ -736,6 +741,39 @@ export function normaliseCallerPhone(input: string | null | undefined): string {
 }
 
 /**
+ * Convert a raw phone value from a webhook payload into an E.164 string,
+ * or return null when the input isn't a valid-looking number.
+ *
+ * Rules (matches the /webhook/post-call handler contract):
+ *   1. Trim + strip whitespace/formatting (parens, dashes, dots).
+ *   2. If the value already starts with '+', keep the leading + and
+ *      digits. Reject fewer than 7 digits as noise.
+ *   3. 10 digits → assume NANP, prepend +1 (North America default).
+ *   4. 11 digits starting with 1 → prepend + (NANP with country code).
+ *   5. 10+ digits without a country code → prepend + as a best guess.
+ *   6. Anything shorter or non-numeric → return null so the caller
+ *      can decide to skip writing the value entirely (we never write
+ *      the string 'unknown' to the DB).
+ */
+export function normalizeInboundPhone(input: unknown): string | null {
+  if (input === null || input === undefined) return null
+  const raw = String(input).trim()
+  if (!raw) return null
+  const cleaned = raw.replace(/[\s\-().]/g, '')
+  if (!cleaned) return null
+  if (cleaned.startsWith('+')) {
+    const digits = cleaned.slice(1).replace(/\D/g, '')
+    return digits.length >= 7 ? `+${digits}` : null
+  }
+  const digits = cleaned.replace(/\D/g, '')
+  if (digits.length === 0) return null
+  if (digits.length === 10) return `+1${digits}`
+  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`
+  if (digits.length >= 10) return `+${digits}`
+  return null
+}
+
+/**
  * Find an existing customer row by phone (within a dealer scope when given).
  * Returns null on miss or when Supabase isn't configured.
  */
@@ -1090,7 +1128,7 @@ export async function getOrCreateCallLogIdForConversation(
       .from('call_logs')
       .insert({
         conversation_id: conversationId,
-        caller_phone: hints?.phone ?? 'unknown',
+        caller_phone: hints?.phone ?? null,
         customer_id: hints?.customerId ?? null,
         dealer_id: hints?.dealerId ?? null,
         direction: 'inbound',

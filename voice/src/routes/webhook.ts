@@ -11,6 +11,7 @@ import {
   findActiveAssignmentForPhone,
   findCustomerByPhone,
   isSupabaseConfigured,
+  normalizeInboundPhone,
   upsertCallLog,
   upsertCustomerByPhone,
 } from '../lib/supabase'
@@ -336,7 +337,10 @@ router.post('/pre-call', async (req: RawBodyRequest, res: Response): Promise<Res
   if (isSupabaseConfigured()) {
     void upsertCallLog({
       call_sid: callSid,
-      caller_phone: phone || 'unknown',
+      // Phase 15b: null instead of 'unknown' when the pre-call webhook
+      // didn't carry a caller-id. Migration 0016 dropped the NOT NULL
+      // on call_logs.caller_phone so the row is still valid.
+      caller_phone: normalizeInboundPhone(phone) ?? null,
       customer_id: customer?.id ?? null,
       dealer_id: dealer.id,
       direction: 'inbound',
@@ -428,22 +432,39 @@ interface PostCallInitiationShape {
 }
 
 /** Either-shape ElevenLabs payload. Production wraps everything under
- *  `data`, legacy / synthetic fixtures ship the fields at the top level. */
+ *  `data`, legacy / synthetic fixtures ship the fields at the top level.
+ *
+ *  ElevenLabs has shipped several caller-id locations across agent
+ *  versions and SIP integrations. We keep the union broad so the
+ *  post-call handler can walk them in priority order and pick the
+ *  first non-empty value. */
 interface PostCallDataShape {
-  conversation_id?: string
-  call_id?: string
-  call_sid?: string
-  caller_phone?: string
-  called_number?: string
+  conversation_id?: string | null
+  call_id?: string | null
+  call_sid?: string | null
+  caller_phone?: string | number | null
+  called_number?: string | null
   duration_secs?: number
   duration_seconds?: number
   call_duration_secs?: number
   metadata?: {
     phone_call?: {
-      external_number?: string
-      to_number?: string
-      internal_number?: string
+      external_number?: string | number | null
+      to_number?: string | null
+      internal_number?: string | null
     }
+    /** Alternate flat caller-id EL emits on some SIP configurations. */
+    caller_id?: string | number | null
+  }
+  /** Newer EL schema: initiation metadata sibling of `metadata` with
+   *  the caller number surfaced as external_caller_id. */
+  conversation_initiation_metadata?: {
+    external_caller_id?: string | number | null
+  }
+  /** Some agent versions ship a `call_data` block with the raw
+   *  telephony phone_number. */
+  call_data?: {
+    phone_number?: string | number | null
   }
   conversation_initiation_client_data?: PostCallInitiationShape
   transcript?: PostCallTranscriptTurn[]
@@ -489,33 +510,79 @@ router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Re
   const envelope: PostCallDataShape =
     (body.data && typeof body.data === 'object') ? body.data : body
 
+  // Conversation id / call sid: guard against the string literals
+  // 'null' or 'undefined' sneaking through — some ElevenLabs agent
+  // versions stringify their optional fields before POSTing. We only
+  // keep values that are real, non-empty strings after trimming.
+  const cleanId = (value: unknown): string | null => {
+    if (typeof value !== 'string' && typeof value !== 'number') return null
+    const s = String(value).trim()
+    if (!s) return null
+    if (s === 'null' || s === 'undefined') return null
+    return s
+  }
   const conversationId =
-    envelope.conversation_id
-    ?? envelope.call_id
-    ?? body.conversation_id
-    ?? body.call_id
-    ?? null
-  const callSid = envelope.call_sid ?? body.call_sid ?? null
+    cleanId(envelope.conversation_id)
+    ?? cleanId(envelope.call_id)
+    ?? cleanId(body.conversation_id)
+    ?? cleanId(body.call_id)
+  const callSid = cleanId(envelope.call_sid) ?? cleanId(body.call_sid)
 
-  // ElevenLabs caller-id resolution order (in priority):
-  //   1. explicit top-level `caller_phone` (legacy / test fixtures)
-  //   2. metadata.phone_call.external_number (Twilio inbound — production)
-  //   3. conversation_initiation_client_data.dynamic_variables.caller_id
-  //      (SIP trunks where Twilio ANI isn't surfaced; we populate this
-  //      ourselves in the pre-call webhook so it's always available when
-  //      the caller's phone was known at start-of-call)
+  // ElevenLabs caller-id resolution order (in priority). EL has
+  // shipped 4+ different envelope shapes over time; we walk each
+  // location and take the first non-empty value. The final value is
+  // normalised to E.164 via normalizeInboundPhone() — if EVERY location
+  // is empty or unparseable, callerPhone stays null and we skip
+  // customer auto-creation entirely (so we don't create a customers row
+  // keyed off the literal string 'unknown').
   const dynamicCallerId =
     envelope.conversation_initiation_client_data?.dynamic_variables?.caller_id
     ?? body.conversation_initiation_client_data?.dynamic_variables?.caller_id
-  const callerPhone = (
-    envelope.caller_phone
-    ?? envelope.metadata?.phone_call?.external_number
-    ?? body.caller_phone
-    ?? body.metadata?.phone_call?.external_number
-    ?? (typeof dynamicCallerId === 'string' || typeof dynamicCallerId === 'number'
-        ? String(dynamicCallerId)
-        : '')
-  ).toString().trim()
+  const rawCallerPhoneCandidates: Array<unknown> = [
+    // Production Twilio inbound (wrapped)
+    envelope.metadata?.phone_call?.external_number,
+    // Alternate EL SIP path — flat caller_id under metadata
+    envelope.metadata?.caller_id,
+    // Newer EL schema — initiation metadata sibling of metadata
+    envelope.conversation_initiation_metadata?.external_caller_id,
+    // Some agent versions ship a call_data block
+    envelope.call_data?.phone_number,
+    // Legacy / test fixtures at the top level
+    envelope.caller_phone,
+    // Top-level equivalents on the outer body (unwrapped payloads)
+    body.caller_phone,
+    body.metadata?.phone_call?.external_number,
+    body.metadata?.caller_id,
+    body.conversation_initiation_metadata?.external_caller_id,
+    body.call_data?.phone_number,
+    // Last resort: caller_id we ourselves populated during pre-call
+    dynamicCallerId,
+  ]
+  let callerPhone: string | null = null
+  for (const candidate of rawCallerPhoneCandidates) {
+    const normalized = normalizeInboundPhone(candidate)
+    if (normalized) {
+      callerPhone = normalized
+      break
+    }
+  }
+  if (!callerPhone) {
+    console.warn(
+      '[post-call] no caller phone in payload; skipping customer auto-create',
+      {
+        checked_locations: [
+          'metadata.phone_call.external_number',
+          'metadata.caller_id',
+          'conversation_initiation_metadata.external_caller_id',
+          'call_data.phone_number',
+          'caller_phone (top-level)',
+          'conversation_initiation_client_data.dynamic_variables.caller_id',
+        ],
+        conversation_id: conversationId,
+        call_sid: callSid,
+      },
+    )
+  }
   const duration =
     envelope.call_duration_secs
     ?? envelope.duration_secs
@@ -557,7 +624,7 @@ router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Re
 
   console.log(
     `[Webhook] post-call conv=${conversationId ?? 'n/a'} sid=${callSid ?? 'n/a'} ` +
-    `phone=${callerPhone || 'unknown'} dealer=${dealer.name} dur=${duration}s ` +
+    `phone=${callerPhone ?? 'none'} dealer=${dealer.name} dur=${duration}s ` +
     `status=${status} turns=${transcript.length} envelope=${envelope === body ? 'flat' : 'wrapped'}`,
   )
 
@@ -566,13 +633,19 @@ router.post('/post-call', async (req: RawBodyRequest, res: Response): Promise<Re
   // call we receive has an associated customers row (so the /customers
   // page lists them) even when they're not yet in CDK. The upsert is
   // idempotent — a row already keyed by (dealer_id, phone) is a no-op.
+  //
+  // Phase 15b: skip the auto-create entirely when we didn't resolve a
+  // caller phone. Writing 'unknown' into customers.phone poisoned the
+  // (dealer_id, phone) unique key and collapsed every unknown-caller
+  // interaction into a single row.
   if (callerPhone && isSupabaseConfigured()) {
+    const phoneForBump = callerPhone
     void upsertCustomerByPhone({
-      phone: callerPhone,
+      phone: phoneForBump,
       dealer_id: dealer.id,
       is_new_customer: true,
     })
-      .then(() => bumpCustomerCallStats(callerPhone, { dealerId: dealer.id }))
+      .then(() => bumpCustomerCallStats(phoneForBump, { dealerId: dealer.id }))
       .catch(() => undefined)
   }
 
